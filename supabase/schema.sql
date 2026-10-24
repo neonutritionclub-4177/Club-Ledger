@@ -28,22 +28,28 @@ create table if not exists public.owner_requests (
   owner_name text not null,
   club_name text not null,
   mobile text not null,
+  email text not null default '',
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
   created_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
   reviewed_at bigint
 );
+
+alter table public.owner_requests add column if not exists email text not null default '';
 
 create table if not exists public.customer_registrations (
   user_uid text primary key,
   club_id text not null references public.clubs(id) on delete cascade,
   customer_name text not null,
   mobile text not null,
+  email text not null default '',
   status text not null default 'pending' check (status in ('pending', 'linked', 'rejected')),
   linked_customer_id text,
   created_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
   updated_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
   unique (club_id, mobile)
 );
+
+alter table public.customer_registrations add column if not exists email text not null default '';
 
 create table if not exists public.customer_portals (
   customer_uid text primary key,
