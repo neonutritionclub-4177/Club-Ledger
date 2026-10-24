@@ -526,10 +526,6 @@ const APP_VERSION = 'v13';
 const STORAGE_KEY = 'clubLedgerData';
 const LOW_SHAKES = CONFIG.lowShakes;
 const EXPIRING_SOON_DAYS = CONFIG.expiringSoonDays;
-// Phone-based usernames map to private email identities used by Supabase Auth.
-const OWNER_DOMAIN = 'owner.club-ledger.app';
-const CUSTOMER_DOMAIN = 'customer.club-ledger.app';
-
 let syncStatus = 'offline'; // 'offline' | 'syncing' | 'synced'
 let supabaseReady = false;
 let supabaseClient = null;
@@ -550,7 +546,7 @@ function loadTheme() { try { return localStorage.getItem('clubLedgerTheme') === 
 
 let state = {
   session: { status: 'loading', role: null, uid: null, username: '' },
-  authForm: { role: loadLastRole(), mode: 'login', username: '', password: '', password2: '', ownerName: '', clubName: '', mobile: '', clubId: '', show: false, busy: false, error: '', info: '' },
+  authForm: { role: loadLastRole(), mode: 'login', username: '', email: '', password: '', password2: '', ownerName: '', clubName: '', mobile: '', clubId: '', show: false, busy: false, error: '', info: '' },
   adminAuthenticated: false,
   adminRequests: [],
   adminForm: { email: 'neonutritionclub@gmail.com', password: '', busy: false, error: '' },
@@ -979,7 +975,7 @@ function startOwnerSync() {
 function refreshPendingRegistrations(clubId) {
   if (!supabaseClient || !clubId) return;
   supabaseClient.from('customer_registrations')
-    .select('user_uid,club_id,customer_name,mobile,status,linked_customer_id,created_at')
+    .select('user_uid,club_id,customer_name,mobile,email,status,linked_customer_id,created_at')
     .eq('club_id', clubId)
     .eq('status', 'pending')
     .order('created_at')
@@ -1068,17 +1064,10 @@ function stopPortalSync() {
   portalChannel = null;
 }
 
-/* ---------- Auth (username + password) ---------- */
-function cleanUsername(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ''); }
-function validUsername(u) { return /^[a-z0-9][a-z0-9_-]{1,28}[a-z0-9]$/.test(u); }
+/* ---------- Auth (email + password) ---------- */
+function cleanEmail(value) { return String(value || '').trim().toLowerCase(); }
+function validEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value)); }
 function normalizedMobile(value) { return String(value || '').replace(/\D/g, ''); }
-function emailFor(role, username, clubId) {
-  const identity = normalizedMobile(username) || cleanUsername(username);
-  return role === 'owner'
-    ? identity + '@' + OWNER_DOMAIN
-    : identity + '+' + String(clubId || '') + '@' + CUSTOMER_DOMAIN;
-}
-function usernameFromEmail(email) { return String(email || '').split('@')[0].split('+')[0]; }
 function randomPassword() {
   const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
   let out = '';
@@ -1091,14 +1080,14 @@ function authErrorText(err) {
   const code = (err && err.code) || '';
   if (code === 'invalid_credentials' || code === 'user_not_found' || code === 'invalid-login-credentials') {
     const hint = state.authForm.role === 'owner' ? ' Customer? Use the Customer tab.' : ' Owner? Use the Owner tab.';
-    return 'Wrong username or password.' + (state.session.status !== 'in' ? hint : '');
+    return 'Wrong email or password.' + (state.session.status !== 'in' ? hint : '');
   }
   if (code === 'over_email_send_rate_limit') {
-    return 'Supabase has temporarily rate-limited signup emails. Disable email confirmation in Supabase Auth, wait for the email limit to reset, then retry. No owner request is created until signup succeeds.';
+    return 'Supabase has temporarily rate-limited signup emails. Disable email confirmation in Supabase Auth, wait for the email limit to reset, then retry. No registration request is saved until signup succeeds.';
   }
   if (code === 'over_request_rate_limit') return 'Supabase has temporarily rate-limited authentication attempts. Stop retrying and wait for the limit to reset.';
-  if (code === 'email_not_confirmed') return 'Email confirmation is enabled. Disable it in Supabase Auth because app logins use private phone-based email identities.';
-  if (code === 'email_exists' || code === 'user_already_exists') return 'That username already has an account. Try logging in or contact your club owner.';
+  if (code === 'email_not_confirmed') return 'Email confirmation is enabled. Turn it off in Supabase Auth, or confirm the account using the email inbox.';
+  if (code === 'email_exists' || code === 'user_already_exists') return 'That email address already has an account. Log in or use a different email address.';
   if (code === 'weak_password') return 'Password too short. Use at least 6 characters.';
   if (code === 'signup_disabled') return 'Supabase email/password sign-up is disabled.';
   if (code === 'network_error') return 'No internet. Connect and try again.';
@@ -1126,7 +1115,7 @@ function resolveRole(user) {
             };
           });
       }
-      return supabaseClient.from('owner_requests').select('user_uid,status,owner_name,club_name,mobile')
+      return supabaseClient.from('owner_requests').select('user_uid,status,owner_name,club_name,mobile,email')
         .eq('user_uid', user.id).maybeSingle().then(function (requestResult) {
           if (requestResult.error) throw requestResult.error;
           if (requestResult.data) {
@@ -1178,7 +1167,7 @@ function restoreCachedRole(user) {
       status: 'in',
       role: cached.role,
       uid: user.id,
-      username: cached.username || usernameFromEmail(user.email),
+      username: cached.username || user.email || '',
       profile: cached.profile || null,
       clubId: cached.clubId || '',
       clubName: cached.clubName || ''
@@ -1225,7 +1214,7 @@ function handleAuthState(user) {
           return supabaseClient.auth.signOut();
         }
         return supabaseClient.from('owner_requests')
-          .select('user_uid,owner_name,club_name,mobile,status,created_at')
+          .select('user_uid,owner_name,club_name,mobile,email,status,created_at')
           .eq('status', 'pending').order('created_at')
           .then(function (result) {
             if (result.error) throw result.error;
@@ -1236,7 +1225,7 @@ function handleAuthState(user) {
             state.adminRequests = (result.data || []).map(function (entry) {
               return {
                 uid: entry.user_uid, ownerName: entry.owner_name, clubName: entry.club_name,
-                mobile: entry.mobile, createdAt: entry.created_at
+                mobile: entry.mobile, email: entry.email, createdAt: entry.created_at
               };
             });
             state.session = { status: 'in', role: 'platformAdmin', uid: user.id, username: user.email || '' };
@@ -1277,7 +1266,7 @@ function handleAuthState(user) {
       }
       state.session = {
         status: 'in', role: role.role, uid: user.id,
-        username: usernameFromEmail(user.email), profile: role.profile || null,
+        username: user.email || '', profile: role.profile || null,
         clubId: role.profile ? role.profile.clubId : role.clubId || '',
         clubName: role.registration && role.registration.club_name ||
           (state.clubDirectory.find(function (club) { return club.id === (role.profile ? role.profile.clubId : role.clubId); }) || {}).name || ''
@@ -1324,6 +1313,7 @@ function syncAuthFromDom() {
   const ownerName = document.getElementById('auth-owner-name');
   const clubName = document.getElementById('auth-club-name');
   const mobile = document.getElementById('auth-mobile');
+  const email = document.getElementById('auth-email');
   const club = document.getElementById('auth-club');
   if (u) state.authForm.username = u.value;
   if (p) state.authForm.password = p.value;
@@ -1332,8 +1322,8 @@ function syncAuthFromDom() {
   if (clubName) state.authForm.clubName = clubName.value;
   if (mobile) {
     state.authForm.mobile = mobile.value;
-    state.authForm.username = mobile.value;
   }
+  if (email) state.authForm.email = email.value;
   if (club) state.authForm.clubId = club.value;
 }
 
@@ -1341,9 +1331,9 @@ function doLogin() {
   syncAuthFromDom();
   const f = state.authForm;
   if (f.busy) return;
-  const username = cleanUsername(f.username);
+  const email = cleanEmail(f.username);
   f.error = '';
-  if (!username || !f.password) { f.error = 'Enter your username and password.'; render(); return; }
+  if (!validEmail(email) || !f.password) { f.error = 'Enter a valid email address and password.'; render(); return; }
   f.busy = true;
   render();
   const role = f.role;
@@ -1352,7 +1342,7 @@ function doLogin() {
     pendingLoginClubId = f.clubId;
   }
   pendingIntent = role;
-  supabaseClient.auth.signInWithPassword({ email: emailFor(role, username, f.clubId), password: f.password })
+  supabaseClient.auth.signInWithPassword({ email: email, password: f.password })
     .then(function (result) {
       if (result.error) throw result.error;
     }).catch(function (err) {
@@ -1368,8 +1358,10 @@ function doOwnerSetup() {
   const f = state.authForm;
   if (f.busy) return;
   const mobile = normalizedMobile(f.mobile || f.username);
+  const email = cleanEmail(f.email);
   f.error = '';
   if (!f.ownerName.trim() || !f.clubName.trim()) { f.error = 'Enter the owner name and nutrition club name.'; render(); return; }
+  if (!validEmail(email)) { f.error = 'Enter a valid email address.'; render(); return; }
   if (!/^\d{8,15}$/.test(mobile)) { f.error = 'Enter a valid mobile number with country code (8–15 digits).'; render(); return; }
   if (f.password.length < 6) { f.error = 'Password needs at least 6 characters.'; render(); return; }
   if (f.password !== f.password2) { f.error = 'Passwords do not match.'; render(); return; }
@@ -1379,9 +1371,9 @@ function doOwnerSetup() {
   ownerClaimPromise = new Promise(function (res) { release = res; });
   pendingIntent = 'owner';
   supabaseClient.auth.signUp({
-    email: emailFor('owner', mobile),
+    email: email,
     password: f.password,
-    options: { data: { role: 'owner', mobile: mobile } }
+    options: { data: { role: 'owner', mobile: mobile, email: email } }
   }).then(function (result) {
       if (result.error) throw result.error;
       if (!result.data.user || !result.data.session) {
@@ -1391,7 +1383,8 @@ function doOwnerSetup() {
         user_uid: result.data.user.id,
         owner_name: f.ownerName.trim(),
         club_name: f.clubName.trim(),
-        mobile: mobile
+        mobile: mobile,
+        email: email
       });
     }).then(function (result) {
       if (result.error) throw result.error;
@@ -1426,9 +1419,11 @@ function doCustomerRegister() {
   syncAuthFromDom();
   const f = state.authForm;
   const mobile = normalizedMobile(f.mobile || f.username);
+  const email = cleanEmail(f.email);
   const clubId = f.clubId;
   f.error = '';
   if (!f.ownerName.trim()) { f.error = 'Enter your name.'; render(); return; }
+  if (!validEmail(email)) { f.error = 'Enter a valid email address.'; render(); return; }
   if (!/^\d{8,15}$/.test(mobile)) { f.error = 'Enter a valid mobile number with country code (8–15 digits).'; render(); return; }
   if (!clubId) { f.error = 'Choose your nutrition club.'; render(); return; }
   if (f.password.length < 6) { f.error = 'Password needs at least 6 characters.'; render(); return; }
@@ -1440,9 +1435,9 @@ function doCustomerRegister() {
   pendingLoginClubId = clubId;
   pendingIntent = 'customer';
   supabaseClient.auth.signUp({
-    email: emailFor('customer', mobile, clubId),
+    email: email,
     password: f.password,
-    options: { data: { role: 'customer', club_id: clubId, mobile: mobile } }
+    options: { data: { role: 'customer', club_id: clubId, mobile: mobile, email: email } }
   }).then(function (result) {
       if (result.error) throw result.error;
       if (!result.data.user || !result.data.session) {
@@ -1452,7 +1447,8 @@ function doCustomerRegister() {
         user_uid: result.data.user.id,
         club_id: clubId,
         customer_name: f.ownerName.trim(),
-        mobile: mobile
+        mobile: mobile,
+        email: email
       });
     })
     .then(function (result) {
@@ -1521,7 +1517,7 @@ function refreshAdminRequests() {
   state.adminForm.error = '';
   render();
   supabaseClient.from('owner_requests')
-    .select('user_uid,owner_name,club_name,mobile,status,created_at')
+    .select('user_uid,owner_name,club_name,mobile,email,status,created_at')
     .eq('status', 'pending').order('created_at')
     .then(function (result) {
       if (result.error) throw result.error;
@@ -1753,7 +1749,7 @@ function renderAdminPage() {
             return `<div class="followup-item">
               <div>
                 <p class="followup-name">${escapeHtml(entry.clubName)}</p>
-                <p class="followup-due">Owner: ${escapeHtml(entry.ownerName)} · ${escapeHtml(entry.mobile)}</p>
+                <p class="followup-due">Owner: ${escapeHtml(entry.ownerName)} · ${escapeHtml(entry.mobile)} · ${escapeHtml(entry.email || '')}</p>
                 <p class="followup-due">Requested ${formatStamp(entry.createdAt)}</p>
               </div>
               <div class="row-actions">
@@ -1818,17 +1814,19 @@ function renderLogin() {
           <div class="field"><label for="auth-owner-name">Club Owner name</label><input id="auth-owner-name" type="text" autocomplete="name" value="${escapeHtml(f.ownerName)}" placeholder="Owner name"></div>
           <div class="field"><label for="auth-club-name">Nutrition Club Name</label><input id="auth-club-name" type="text" value="${escapeHtml(f.clubName)}" placeholder="Your club name"></div>
           <div class="field"><label for="auth-mobile">Mobile Number (with country code)</label><input id="auth-mobile" type="tel" inputmode="tel" autocomplete="tel" value="${escapeHtml(f.mobile)}" placeholder="+91 98765 43210"></div>
+          <div class="field"><label for="auth-email">Email address</label><input id="auth-email" type="email" inputmode="email" autocomplete="email" value="${escapeHtml(f.email)}" placeholder="you@example.com"></div>
         ` : customerRegister ? `
           <div class="field"><label for="auth-owner-name">Name</label><input id="auth-owner-name" type="text" autocomplete="name" value="${escapeHtml(f.ownerName)}" placeholder="Your full name"></div>
           <div class="field"><label for="auth-mobile">Mobile Number (with country code)</label><input id="auth-mobile" type="tel" inputmode="tel" autocomplete="tel" value="${escapeHtml(f.mobile)}" placeholder="+91 98765 43210"></div>
+          <div class="field"><label for="auth-email">Email address</label><input id="auth-email" type="email" inputmode="email" autocomplete="email" value="${escapeHtml(f.email)}" placeholder="you@example.com"></div>
           <div class="field"><label for="auth-club">Nutrition Club</label>
             <select id="auth-club" data-bind="authForm.clubId">
               <option value="">${state.directoryError ? 'Could not load clubs' : (directoryLoaded ? 'Choose your club' : 'Loading clubs…')}</option>
               ${state.clubDirectory.map(club => `<option value="${escapeHtml(club.id)}" ${f.clubId === club.id ? 'selected' : ''}>${escapeHtml(club.name)}</option>`).join('')}
             </select>${state.directoryError ? `<button type="button" class="link-btn" data-action="retryClubDirectory">Try loading again</button>` : ''}</div>
         ` : `
-          <div class="field"><label for="auth-user">Mobile Number (with country code)</label>
-            <input id="auth-user" name="username" type="tel" inputmode="tel" autocomplete="username" value="${escapeHtml(f.username)}" placeholder="+91 98765 43210"></div>
+          <div class="field"><label for="auth-user">Email address</label>
+            <input id="auth-user" name="username" type="email" inputmode="email" autocomplete="username" value="${escapeHtml(f.username)}" placeholder="you@example.com"></div>
           ${!isOwner ? `<div class="field"><label for="auth-club">Nutrition Club</label>
             <select id="auth-club" data-bind="authForm.clubId">
               <option value="">${state.directoryError ? 'Could not load clubs' : (directoryLoaded ? 'Choose your club' : 'Loading clubs…')}</option>
@@ -2117,7 +2115,7 @@ function renderLoginBox(c) {
     return `
       <p class="payments-title">Customer app login</p>
       <div class="login-box">
-        <p class="line">Username: <b>${escapeHtml(c.login.username)}</b> · sees only their shakes left &amp; balance</p>
+        <p class="line">Email: <b>${escapeHtml(c.login.email || c.login.username)}</b> · sees only their shakes left &amp; balance</p>
         <div class="detail-actions">
           <button class="btn-primary-sm" data-action="openCustLogin" data-id="${c.id}" data-mode="reset">Reset password</button>
           <button class="btn-icon delete" data-action="openRemoveLogin" data-id="${c.id}">Remove login</button>
@@ -3014,7 +3012,7 @@ function renderCustLoginModal(m) {
         <div class="modal-head"><h2>${reset ? 'New password ready' : 'Login created'}</h2><button data-action="closeModal">${ICONS.x}</button></div>
         <p class="modal-sub">${escapeHtml(c.name)}</p>
         <div class="cred-box">
-          <p>Username: <b>${escapeHtml(f.username)}</b></p>
+          <p>Email: <b>${escapeHtml(f.email)}</b></p>
           <p>Password: <b>${escapeHtml(f.password)}</b></p>
         </div>
         <p class="field-hint" style="margin:0 0 12px">Shown only now. It is not saved anywhere. Send it to the customer.</p>
@@ -3023,19 +3021,19 @@ function renderCustLoginModal(m) {
       </div>
     </div>`;
   }
-  const valid = validUsername(cleanUsername(f.username)) && String(f.password).length >= 6 && !f.busy;
+  const valid = (reset || validEmail(f.email)) && String(f.password).length >= 6 && !f.busy;
   return `
     <div class="modal-overlay">
       <div class="modal-card">
         <div class="modal-head"><h2>${reset ? 'Reset password' : 'Create customer login'}</h2><button data-action="closeModal">${ICONS.x}</button></div>
         <p class="modal-sub">${escapeHtml(c.name)} · they will see only shakes left and balance.</p>
         ${f.error ? `<div class="auth-error">${escapeHtml(f.error)}</div>` : ''}
-        <div class="field"><label>Username *</label><input id="f-lg-user" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" data-bind="modalForm.username" value="${escapeHtml(f.username)}" ${reset ? 'disabled' : ''} placeholder="e.g. phone number"></div>
+        ${reset ? `<div class="field"><label>Email address</label><input type="email" value="${escapeHtml(f.email)}" disabled></div>` : `<div class="field"><label>Email address *</label><input id="f-lg-email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" data-bind="modalForm.email" value="${escapeHtml(f.email)}" placeholder="customer@example.com"></div>`}
         <div class="field"><label>Password *</label>
           <input id="f-lg-pass" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" data-bind="modalForm.password" value="${escapeHtml(f.password)}" placeholder="min 6 characters">
           <button type="button" class="quick-chip" style="margin-top:8px;width:100%" data-action="genPassword">Generate new password</button>
         </div>
-        <p class="field-hint">${reset ? 'The old password stops working once you save.' : 'Letters and numbers only for the username (3+ characters).'}</p>
+        <p class="field-hint">${reset ? 'The old password stops working once you save.' : 'The customer will sign in using this email address and password.'}</p>
         <button class="btn-save" data-action="saveCustLogin" ${valid ? '' : 'disabled'}>${f.busy ? 'Please wait…' : (reset ? 'Set new password' : 'Create login')}</button>
       </div>
     </div>`;
@@ -3091,13 +3089,13 @@ function renderChangePwModal() {
 
 function renderAddOwnerModal() {
   const f = state.modalForm;
-  const valid = /^\d{8,15}$/.test(normalizedMobile(f.username)) && String(f.password).length >= 6 && !f.busy;
+  const valid = validEmail(f.email) && /^\d{8,15}$/.test(normalizedMobile(f.username)) && String(f.password).length >= 6 && !f.busy;
   if (f.done) {
     return `
     <div class="modal-overlay">
       <div class="modal-card">
         <div class="modal-head"><h2>Owner added</h2><button data-action="closeModal">${ICONS.x}</button></div>
-        <div class="cred-box"><p>Mobile: <b>${escapeHtml(f.username)}</b></p><p>Password: <b>${escapeHtml(f.password)}</b></p></div>
+        <div class="cred-box"><p>Email: <b>${escapeHtml(f.email)}</b></p><p>Mobile: <b>${escapeHtml(f.username)}</b></p><p>Password: <b>${escapeHtml(f.password)}</b></p></div>
         <p class="field-hint">Share these privately. They log in from the Owner tab.</p>
         <button class="btn-save ghost" data-action="closeModal">Done</button>
       </div>
@@ -3109,6 +3107,7 @@ function renderAddOwnerModal() {
         <div class="modal-head"><h2>Add another owner</h2><button data-action="closeModal">${ICONS.x}</button></div>
         <p class="modal-sub">Owners can see and edit everything. Only add people you trust.</p>
         ${f.error ? `<div class="auth-error">${escapeHtml(f.error)}</div>` : ''}
+        <div class="field"><label>Email address *</label><input type="email" inputmode="email" autocomplete="email" data-bind="modalForm.email" value="${escapeHtml(f.email)}" placeholder="owner@example.com"></div>
         <div class="field"><label>Mobile Number (with country code) *</label><input id="f-ow-user" type="tel" inputmode="tel" data-bind="modalForm.username" value="${escapeHtml(f.username)}" placeholder="+91 98765 43210"></div>
         <div class="field"><label>Password * (min 6)</label><input id="f-ow-pass" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" data-bind="modalForm.password" value="${escapeHtml(f.password)}">
           <button type="button" class="quick-chip" style="margin-top:8px;width:100%" data-action="genPassword">Generate password</button></div>
@@ -3354,7 +3353,7 @@ function handleAction(action, target) {
       break;
     case 'openAddOwner':
       state.modal = { type: 'addOwner' };
-      state.modalForm = { username: '', password: randomPassword(), busy: false, error: '', done: false };
+      state.modalForm = { email: '', username: '', password: randomPassword(), busy: false, error: '', done: false };
       render();
       break;
     case 'genPassword':
@@ -3366,7 +3365,7 @@ function handleAction(action, target) {
       if (!c) break;
       const reset = target.dataset.mode === 'reset' && c.login;
       state.modal = { type: 'custLogin', id, mode: reset ? 'reset' : 'create' };
-      state.modalForm = { username: reset ? c.login.username : suggestUsername(c), password: randomPassword(), busy: false, error: '', done: false };
+      state.modalForm = { email: reset ? c.login.email : '', password: randomPassword(), busy: false, error: '', done: false };
       render();
       break;
     }
@@ -3582,7 +3581,12 @@ function doLinkRegistration() {
     render();
     return;
   }
-  const email = emailFor('customer', registration.mobile, clubId);
+  const email = cleanEmail(registration.email);
+  if (!validEmail(email)) {
+    form.error = 'This registration has no valid email address. Ask the customer to register again with a valid email.';
+    render();
+    return;
+  }
   if (!customer) {
     customer = migrateCustomer({
       id: uid(),
@@ -3598,7 +3602,7 @@ function doLinkRegistration() {
     });
   }
   const login = {
-    username: registration.mobile,
+    username: email,
     email: email,
     uid: registration.uid,
     createdAt: localDateStr(Date.now())
@@ -3682,37 +3686,22 @@ function doRenewPack() {
 }
 
 /* ---- v10: customer logins ---- */
-function suggestUsername(c) {
-  const digits = String(c.phone || '').replace(/\D/g, '').slice(-10);
-  if (digits.length >= 10) return digits;
-  const slug = String(c.name || 'customer').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 14) || 'customer';
-  return slug.length >= 3 ? slug : slug + '123';
-}
-function credentialMessage(c, username, password) {
+function credentialMessage(c, email, password) {
   return 'Hi ' + c.name + ', you can now check your shakes left and balance in the ' + currentClubName() + ' app.\n\n' +
-    'Open: ' + appUrl() + '\nChoose "Customer", then log in:\nUsername: ' + username + '\nPassword: ' + password + '\n\nPlease keep this private.';
+    'Open: ' + appUrl() + '\nChoose "Customer", then log in:\nEmail: ' + email + '\nPassword: ' + password + '\n\nPlease keep this private.';
 }
-function createCustomerAuth(username, password, startRev) {
+function createCustomerAuth(email, password) {
   const clubId = state.session.profile && state.session.profile.clubId;
   const customer = state.customers.find(function (entry) { return state.modal && entry.id === state.modal.id; });
   if (!customer) return Promise.reject(new Error('Customer record could not be found.'));
-  const attempt = function (revision) {
-    return manageAccount('customer-create', {
-      clubId: clubId,
-      customerId: customer.id,
-      customerName: customer.name,
-      mobile: customer.phone,
-      username: username,
-      password: password,
-      revision: revision
-    }).catch(function (err) {
-      if ((err.code === 'email_exists' || err.code === 'user_already_exists') && revision < startRev + 8) {
-        return attempt(revision + 1);
-      }
-      throw err;
-    });
-  };
-  return attempt(startRev);
+  return manageAccount('customer-create', {
+    clubId: clubId,
+    customerId: customer.id,
+    customerName: customer.name,
+    mobile: customer.phone,
+    email: email,
+    password: password
+  });
 }
 function doSaveCustLogin() {
   const f = state.modalForm;
@@ -3720,25 +3709,21 @@ function doSaveCustLogin() {
   const c = state.customers.find(x => x.id === m.id);
   if (!c || f.busy) return;
   const reset = m.mode === 'reset' && c.login;
-  const username = cleanUsername(f.username);
-  if (!validUsername(username)) { f.error = 'Username: 3-30 letters or numbers (a-z, 0-9, _ -).'; render(); return; }
+  const email = cleanEmail(f.email);
+  if (!reset && !validEmail(email)) { f.error = 'Enter a valid email address for this customer.'; render(); return; }
   if (String(f.password).length < 6) { f.error = 'Password needs at least 6 characters.'; render(); return; }
-  if (!reset && state.customers.some(x => x.id !== c.id && x.login && x.login.username === username)) {
-    f.error = 'That username is already used by another customer.'; render(); return;
-  }
   f.busy = true;
   f.error = '';
   render();
   const oldUid = reset ? c.login.uid : null;
-  const startRev = reset ? (Number(c.login.rev) || 1) + 1 : 1;
   const clubId = state.session.profile && state.session.profile.clubId;
   if (!clubId) { f.busy = false; f.error = 'Club details are unavailable. Sign in again.'; render(); return; }
   const operation = reset
     ? manageAccount('customer-reset', { clubId: clubId, customerId: c.id, customerUid: oldUid, password: f.password })
-    : createCustomerAuth(username, f.password, startRev);
+    : createCustomerAuth(email, f.password);
   operation.then(function (res) {
       if (!reset) {
-        c.login = { username: username, email: res.email, uid: res.uid, rev: res.revision, createdAt: todayStr() };
+        c.login = { username: email, email: res.email, uid: res.uid, createdAt: todayStr() };
       }
       return saveData();
     }).then(function () {
@@ -3788,15 +3773,17 @@ function doAddOwner() {
   const f = state.modalForm;
   if (f.busy) return;
   const username = normalizedMobile(f.username);
+  const email = cleanEmail(f.email);
   if (!/^\d{8,15}$/.test(username)) { f.error = 'Enter a valid mobile number with country code (8–15 digits).'; render(); return; }
+  if (!validEmail(email)) { f.error = 'Enter a valid email address.'; render(); return; }
   if (String(f.password || '').length < 6) { f.error = 'Password needs at least 6 characters.'; render(); return; }
   f.busy = true; f.error = '';
   render();
   manageAccount('owner-add', {
-    mobile: username, password: f.password,
+    mobile: username, email: email, password: f.password,
     clubId: state.session.profile.clubId, ownerName: f.ownerName || username
   }).then(function () {
-    f.username = username; f.done = true; f.busy = false; render();
+    f.username = username; f.email = email; f.done = true; f.busy = false; render();
   }).catch(function (err) {
     f.busy = false; f.error = authErrorText(err); render();
   });
