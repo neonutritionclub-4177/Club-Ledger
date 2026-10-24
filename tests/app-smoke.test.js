@@ -47,7 +47,7 @@ function createApp() {
       state, orderTotal, orderBalance, balanceOf, attendanceCount, shakesRemaining,
       doAdjustAttendance, doDeletePayment, activeCustomers, mergeRecords, migrateCustomer,
       migrateBackupCustomer, portalFor, saveData, renderLogin, currentClubName, renderAdminPage,
-      renderApp, authErrorText, OWNER_APPROVAL_WHATSAPP
+      renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP
     };
   `, context);
   return { api: context.testApi, context };
@@ -151,7 +151,7 @@ test('customer portal snapshot contains only that customer history', () => {
   assert.equal(portal.packs[0].startDate, '2026-10-01');
 });
 
-test('customer registration asks for identity, mobile, password confirmation, and club', () => {
+test('customer registration asks for identity, email, mobile, password confirmation, and club', () => {
   const { api } = createApp();
   api.state.authForm.role = 'customer';
   api.state.authForm.mode = 'register';
@@ -160,19 +160,21 @@ test('customer registration asks for identity, mobile, password confirmation, an
   const html = api.renderLogin();
   assert.match(html, /Back to customer login/);
   assert.match(html, /Name/);
+  assert.match(html, /id="auth-email" type="email"/);
   assert.match(html, /Mobile Number \(with country code\)/);
   assert.match(html, /Confirm password/);
   assert.match(html, /Nutrition Club A/);
   assert.match(html, /approve and link/i);
 });
 
-test('owner setup requests club owner name, club name, mobile, and password confirmation', () => {
+test('owner setup requests owner name, club name, real email, mobile, and password confirmation', () => {
   const { api } = createApp();
   api.state.authForm.role = 'owner';
   api.state.authForm.mode = 'setup';
   const html = api.renderLogin();
   assert.match(html, /Club Owner name/);
   assert.match(html, /Nutrition Club Name/);
+  assert.match(html, /id="auth-email" type="email"/);
   assert.match(html, /Mobile Number \(with country code\)/);
   assert.match(html, /Confirm password/);
 });
@@ -197,13 +199,51 @@ test('admin route renders a sign-in screen and an owner approval queue', () => {
   api.state.adminAuthenticated = true;
   api.state.adminRequests = [{
     uid: 'owner-1', ownerName: 'Owner One', clubName: 'Nutrition Club One',
-    mobile: '+919876543210', createdAt: Date.now()
+    mobile: '+919876543210', email: 'owner@example.com', status: 'pending',
+    createdAt: Date.now(), archived: false
   }];
   const html = api.renderAdminPage();
   assert.match(html, /Pending owner requests \(1\)/);
   assert.match(html, /Nutrition Club One/);
+  assert.match(html, /owner@example\.com/);
   assert.match(html, /data-action="approveOwner"/);
   assert.match(html, /data-action="rejectOwner"/);
+  assert.match(html, /type="month" data-bind="adminForm.monthFilter"/);
+  assert.match(html, /Past approvals &amp; requests/);
+  assert.match(html, /data-action="archiveOwnerRequest"/);
+  assert.match(html, /data-action="editOwnerRequest"/);
+  api.state.adminRequests.push(
+    { uid: 'owner-approved', ownerName: 'Approved', clubName: 'Approved Club', status: 'approved', createdAt: Date.now() },
+    { uid: 'owner-revoked', ownerName: 'Revoked', clubName: 'Revoked Club', status: 'revoked', createdAt: Date.now() }
+  );
+  const historyHtml = api.renderAdminPage();
+  assert.match(historyHtml, /data-action="revokeOwner"/);
+  assert.match(historyHtml, /data-action="restoreOwnerAccess"/);
+});
+
+test('admin history can show archived rows and the owner edit form', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  api.state.adminShowArchived = true;
+  api.state.adminRequests = [{
+    uid: 'owner-2', ownerName: 'Owner Two', clubName: 'Club Two',
+    mobile: '+919876543211', email: 'owner2@example.com', status: 'revoked',
+    createdAt: Date.now(), reviewedAt: Date.now(), archived: true
+  }];
+  const archivedHtml = api.renderAdminPage();
+  assert.match(archivedHtml, /Archived owner requests \(1\)/);
+  assert.match(archivedHtml, /Status: revoked/);
+  assert.match(archivedHtml, /data-action="restoreOwnerRequest"/);
+
+  api.state.modal = { type: 'adminEditOwner', id: 'owner-2' };
+  api.state.modalForm = {
+    ownerName: 'Owner Two', clubName: 'Club Two', mobile: '+919876543211',
+    email: 'owner2@example.com', password: '', busy: false, error: ''
+  };
+  const modal = api.renderModal();
+  assert.match(modal, /data-form="adminOwnerEdit"/);
+  assert.match(modal, /Set new password \(optional\)/);
+  assert.match(modal, /Leave blank to keep (?:the )?current password/);
 });
 
 test('registration-only customer migration does not create an unpriced shake pack', () => {
@@ -238,17 +278,29 @@ test('signup rate-limit errors explain why owner requests are not listed', () =>
   const { api } = createApp();
   const message = api.authErrorText({ code: 'over_email_send_rate_limit' });
   assert.match(message, /email confirmation/i);
-  assert.match(message, /No owner request is created until signup succeeds/i);
+  assert.match(message, /No registration request is saved until signup succeeds/i);
   assert.match(api.authErrorText({ code: 'over_request_rate_limit' }), /wait for the limit to reset/i);
 });
 
 test('Supabase schema scopes data and protects owner approvals', () => {
   const schema = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'schema.sql'), 'utf8');
   assert.match(schema, /create table if not exists public\.owner_requests/);
+  assert.match(schema, /alter table public\.owner_requests add column if not exists email text not null default ''/);
+  assert.match(schema, /create or replace function public\.create_owner_request_from_auth\(\)/);
+  assert.match(schema, /after insert on auth\.users/);
+  assert.match(schema, /new\.raw_user_meta_data ->> 'role' is distinct from 'owner'/);
+  assert.match(schema, /on conflict \(user_uid\) do nothing/);
+  assert.doesNotMatch(schema, /Users can create their own owner request/);
+  assert.match(schema, /alter table public\.customer_registrations add column if not exists email text not null default ''/);
   assert.match(schema, /create table if not exists public\.platform_admins/);
   assert.match(schema, /create table if not exists public\.customer_registrations/);
   assert.match(schema, /create table if not exists public\.customer_portals/);
   assert.match(schema, /create or replace function public\.review_owner_request/);
+  assert.match(schema, /archived boolean not null default false/);
+  assert.match(schema, /create or replace function public\.set_owner_request_archived/);
+  assert.match(schema, /create or replace function public\.set_owner_access/);
+  assert.match(schema, /create or replace function public\.admin_update_owner_details/);
+  assert.match(schema, /'revoked'/);
   assert.match(schema, /if not public\.is_platform_admin\(\)/);
   assert.match(schema, /public\.is_club_owner\(club_id\)/);
   assert.match(schema, /select public\.is_club_owner\(target_club_id\) and exists/);
@@ -293,6 +345,12 @@ test('Vercel static deployment disables stale service worker caching', () => {
   assert.match(html, /<script type="module">/);
   assert.match(html, /register\('\/sw\.js'\)/);
   assert.doesNotMatch(html, /firebase/i);
+  assert.match(html, /supabaseClient\.auth\.signUp\(\{\s*email:\s*email,/);
+  assert.match(html, /role:\s*'owner',\s*mobile:\s*mobile,\s*email:\s*email,\s*owner_name:\s*f\.ownerName\.trim\(\),\s*club_name:\s*f\.clubName\.trim\(\)/);
+  assert.match(html, /owner_name:\s*f\.ownerName\.trim\(\),\s*club_name:\s*f\.clubName\.trim\(\)/);
+  assert.doesNotMatch(html, /owner_requests'\)\.insert\(/);
+  assert.match(html, /customer_registrations'\)\.insert\(\{[\s\S]*?email:\s*email/);
+  assert.doesNotMatch(html, /@owner\.club-ledger\.app|@customer\.club-ledger\.app/);
   assert.match(html, /supabaseClient\.auth\.signInWithPassword/);
   assert.match(html, /supabaseClient\.rpc\('review_owner_request'/);
   const config = fs.readFileSync(path.join(__dirname, '..', 'js', 'config.js'), 'utf8');
@@ -308,5 +366,10 @@ test('Vercel static deployment disables stale service worker caching', () => {
   const functionSource = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'functions', 'manage-account', 'index.ts'), 'utf8');
   assert.match(functionSource, /auth\.admin\.createUser/);
   assert.match(functionSource, /auth\.admin\.updateUserById/);
+  assert.match(functionSource, /action === "admin-owner-edit"/);
+  assert.match(functionSource, /from\("platform_admins"\)/);
+  assert.match(functionSource, /const email = cleanEmail\(body\.email\)/);
+  assert.match(functionSource, /email,/);
+  assert.doesNotMatch(functionSource, /club-ledger\.app/);
   assert.match(functionSource, /is required/);
 });
