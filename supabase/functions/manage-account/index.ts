@@ -55,6 +55,85 @@ Deno.serve(async (request) => {
     const body = await request.json();
     const action = cleanText(body.action, 32);
     const clubId = cleanText(body.clubId, 128);
+
+    if (action === "admin-owner-edit") {
+      const { data: adminMembership, error: adminMembershipError } = await admin
+        .from("platform_admins")
+        .select("user_uid")
+        .eq("user_uid", callerUid)
+        .maybeSingle();
+      if (adminMembershipError) throw adminMembershipError;
+      if (!adminMembership) return response({ error: "Platform administrator access is required." }, 403);
+
+      const ownerUid = cleanText(body.ownerUid, 128);
+      const ownerName = cleanText(body.ownerName, 80);
+      const clubName = cleanText(body.clubName, 120);
+      const mobile = cleanPhone(body.mobile);
+      const email = cleanEmail(body.email);
+      const password = String(body.password || "");
+      if (!ownerUid || !ownerName || !clubName || !/^\d{8,15}$/.test(mobile) ||
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+          (password && password.length < 6)) {
+        return response({ error: "Enter a valid owner name, club name, email, mobile number, and optional password of at least 6 characters." }, 400);
+      }
+
+      const { data: ownerRequest, error: requestError } = await admin
+        .from("owner_requests")
+        .select("user_uid,owner_name,club_name,mobile,email,status")
+        .eq("user_uid", ownerUid)
+        .maybeSingle();
+      if (requestError) throw requestError;
+      if (!ownerRequest) return response({ error: "Owner history record could not be found." }, 404);
+
+      const { data: ownerAuth, error: ownerAuthError } = await admin.auth.admin.getUserById(ownerUid);
+      if (ownerAuthError) throw ownerAuthError;
+      const previousMetadata = ownerAuth.user.user_metadata || {};
+
+      const { error: profileError } = await admin.rpc("admin_update_owner_details", {
+        actor_uid: callerUid,
+        request_uid: ownerUid,
+        new_owner_name: ownerName,
+        new_club_name: clubName,
+        new_mobile: mobile,
+        new_email: email,
+      });
+      if (profileError) throw profileError;
+
+      const authUpdate = {
+        email,
+        email_confirm: true,
+        user_metadata: {
+          ...previousMetadata,
+          role: "owner",
+          owner_name: ownerName,
+          club_name: clubName,
+          mobile,
+          email,
+        },
+        ...(password ? { password } : {}),
+      };
+
+      const { error: authUpdateError } = await admin.auth.admin.updateUserById(ownerUid, authUpdate);
+      if (authUpdateError) {
+        const { error: rollbackError } = await admin.rpc("admin_update_owner_details", {
+          actor_uid: callerUid,
+          request_uid: ownerUid,
+          new_owner_name: ownerRequest.owner_name,
+          new_club_name: ownerRequest.club_name,
+          new_mobile: ownerRequest.mobile,
+          new_email: ownerRequest.email,
+        });
+        if (rollbackError) {
+          console.error("Owner profile rollback failed:", rollbackError);
+          return response({
+            error: "Auth update failed and the profile rollback also failed. Review this owner's record before retrying.",
+          }, 500);
+        }
+        return response({ error: authUpdateError.message, code: authUpdateError.code }, 409);
+      }
+      return response({ uid: ownerUid, email });
+    }
+
     const { data: membership, error: membershipError } = await admin
       .from("club_owners")
       .select("club_id")
