@@ -36,6 +36,45 @@ create table if not exists public.owner_requests (
 
 alter table public.owner_requests add column if not exists email text not null default '';
 
+create or replace function public.create_owner_request_from_auth()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  owner_name_value text := nullif(btrim(new.raw_user_meta_data ->> 'owner_name'), '');
+  club_name_value text := nullif(btrim(new.raw_user_meta_data ->> 'club_name'), '');
+  mobile_value text := nullif(regexp_replace(coalesce(new.raw_user_meta_data ->> 'mobile', ''), '[^0-9]', '', 'g'), '');
+begin
+  if new.raw_user_meta_data ->> 'role' is distinct from 'owner' then
+    return new;
+  end if;
+
+  if owner_name_value is null or club_name_value is null
+      or mobile_value is null or coalesce(new.email, '') = '' then
+    raise exception 'Owner signup requires an email, owner name, club name, and mobile number';
+  end if;
+
+  insert into public.owner_requests (
+    user_uid, owner_name, club_name, mobile, email, status
+  ) values (
+    new.id::text, owner_name_value, club_name_value, mobile_value,
+    lower(new.email), 'pending'
+  )
+  on conflict (user_uid) do nothing;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.create_owner_request_from_auth() from public, anon, authenticated;
+
+drop trigger if exists create_owner_request_after_auth_signup on auth.users;
+create trigger create_owner_request_after_auth_signup
+  after insert on auth.users
+  for each row execute function public.create_owner_request_from_auth();
+
 create table if not exists public.customer_registrations (
   user_uid text primary key,
   club_id text not null references public.clubs(id) on delete cascade,
@@ -210,10 +249,6 @@ create policy "Club owners can access their ledger"
   using (public.is_club_owner(club_id))
   with check (public.is_club_owner(club_id));
 
-drop policy if exists "Users can create their own owner request" on public.owner_requests;
-create policy "Users can create their own owner request"
-  on public.owner_requests for insert to authenticated
-  with check (user_uid = auth.uid()::text and status = 'pending');
 drop policy if exists "Users and admins can read owner requests" on public.owner_requests;
 create policy "Users and admins can read owner requests"
   on public.owner_requests for select to authenticated
