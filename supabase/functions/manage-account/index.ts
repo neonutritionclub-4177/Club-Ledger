@@ -21,6 +21,10 @@ function cleanPhone(value: unknown) {
   return String(value || "").replace(/\D/g, "");
 }
 
+function cleanEmail(value: unknown) {
+  return String(value || "").trim().toLowerCase();
+}
+
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (request.method !== "POST") return response({ error: "Method not allowed" }, 405);
@@ -61,16 +65,15 @@ Deno.serve(async (request) => {
     if (!membership) return response({ error: "Club owner access is required." }, 403);
 
     if (action === "customer-create") {
-      const username = cleanText(body.username, 30).toLowerCase();
+      const email = cleanEmail(body.email);
       const password = String(body.password || "");
       const customerId = cleanText(body.customerId, 128);
       const customerName = cleanText(body.customerName, 80);
       const mobile = cleanPhone(body.mobile);
-      const revision = Math.max(1, Math.min(10, Number(body.revision) || 1));
-      if (!/^[a-z0-9][a-z0-9_-]{1,28}[a-z0-9]$/.test(username) ||
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
           !/^\d{8,15}$/.test(mobile) || password.length < 6 ||
           !customerId || !customerName) {
-        return response({ error: "Valid customer login details are required." }, 400);
+        return response({ error: "A valid customer email, mobile number, and password are required." }, 400);
       }
 
       const { data: ledgerRow, error: ledgerError } = await admin
@@ -89,9 +92,6 @@ Deno.serve(async (request) => {
         return response({ error: "This customer already has a login. Reset or remove it first." }, 409);
       }
 
-      const identity = cleanPhone(username) || username;
-      const suffix = revision > 1 ? "-r" + revision : "";
-      const email = identity + "+" + clubId + suffix + "@customer.club-ledger.app";
       const { data: created, error: createError } = await admin.auth.admin.createUser({
         email,
         password,
@@ -105,6 +105,7 @@ Deno.serve(async (request) => {
         club_id: clubId,
         customer_name: customerName,
         mobile,
+        email,
         status: "linked",
         linked_customer_id: customerId,
       });
@@ -112,7 +113,7 @@ Deno.serve(async (request) => {
         await admin.auth.admin.deleteUser(created.user.id);
         throw registrationError;
       }
-      return response({ uid: created.user.id, email, revision });
+      return response({ uid: created.user.id, email });
     }
 
     if (action === "customer-reset" || action === "customer-remove") {
@@ -161,12 +162,13 @@ Deno.serve(async (request) => {
 
     if (action === "owner-add") {
       const mobile = cleanPhone(body.mobile);
+      const email = cleanEmail(body.email);
       const ownerName = cleanText(body.ownerName, 80);
       const password = String(body.password || "");
-      if (!/^\d{8,15}$/.test(mobile) || !ownerName || password.length < 6) {
-        return response({ error: "Valid owner details and a password are required." }, 400);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+          !/^\d{8,15}$/.test(mobile) || !ownerName || password.length < 6) {
+        return response({ error: "A valid owner email, mobile number, name, and password are required." }, 400);
       }
-      const email = mobile + "@owner.club-ledger.app";
       const { data: created, error: createError } = await admin.auth.admin.createUser({
         email,
         password,
