@@ -549,7 +549,8 @@ let state = {
   authForm: { role: loadLastRole(), mode: 'login', username: '', email: '', password: '', password2: '', ownerName: '', clubName: '', mobile: '', clubId: '', show: false, busy: false, error: '', info: '' },
   adminAuthenticated: false,
   adminRequests: [],
-  adminForm: { email: 'neonutritionclub@gmail.com', password: '', busy: false, error: '' },
+  adminForm: { email: 'neonutritionclub@gmail.com', password: '', busy: false, error: '', monthFilter: '' },
+  adminShowArchived: false,
   ownerApprovalNotice: false,
   clubDirectory: [],
   directoryError: false,
@@ -1137,6 +1138,20 @@ function resolveRole(user) {
 }
 let pendingLoginClubId = '';
 
+function mapOwnerRequest(entry) {
+  return {
+    uid: entry.user_uid,
+    ownerName: entry.owner_name,
+    clubName: entry.club_name,
+    mobile: entry.mobile,
+    email: entry.email,
+    status: entry.status,
+    createdAt: entry.created_at,
+    reviewedAt: entry.reviewed_at,
+    archived: Boolean(entry.archived)
+  };
+}
+
 function setSessionOut() {
   stopOwnerSync();
   stopPortalSync();
@@ -1214,20 +1229,15 @@ function handleAuthState(user) {
           return supabaseClient.auth.signOut();
         }
         return supabaseClient.from('owner_requests')
-          .select('user_uid,owner_name,club_name,mobile,email,status,created_at')
-          .eq('status', 'pending').order('created_at')
+          .select('user_uid,owner_name,club_name,mobile,email,status,created_at,reviewed_at,archived')
+          .eq('archived', state.adminShowArchived).order('created_at', { ascending: false })
           .then(function (result) {
             if (result.error) throw result.error;
             state.adminAuthenticated = true;
             state.adminForm.busy = false;
             state.adminForm.password = '';
             state.adminForm.error = '';
-            state.adminRequests = (result.data || []).map(function (entry) {
-              return {
-                uid: entry.user_uid, ownerName: entry.owner_name, clubName: entry.club_name,
-                mobile: entry.mobile, email: entry.email, createdAt: entry.created_at
-              };
-            });
+            state.adminRequests = (result.data || []).map(mapOwnerRequest);
             state.session = { status: 'in', role: 'platformAdmin', uid: user.id, username: user.email || '' };
             render();
           });
@@ -1254,7 +1264,9 @@ function handleAuthState(user) {
       if (role.role === 'pendingOwner') {
         state.authForm.error = role.ownerRequest && role.ownerRequest.status === 'rejected'
           ? 'This owner request was not approved. Contact the administrator for help.'
-          : 'This owner account is awaiting administrator approval.';
+          : (role.ownerRequest && role.ownerRequest.status === 'revoked'
+            ? 'Access to this owner account has been revoked. Contact the administrator for help.'
+            : 'This owner account is awaiting administrator approval.');
         state.authForm.busy = false;
         return supabaseClient.auth.signOut().then(render);
       }
@@ -1373,21 +1385,13 @@ function doOwnerSetup() {
   supabaseClient.auth.signUp({
     email: email,
     password: f.password,
-    options: { data: { role: 'owner', mobile: mobile, email: email } }
+    options: { data: {
+      role: 'owner', mobile: mobile, email: email,
+      owner_name: f.ownerName.trim(), club_name: f.clubName.trim()
+    } }
   }).then(function (result) {
       if (result.error) throw result.error;
-      if (!result.data.user || !result.data.session) {
-        throw new Error('Supabase did not create a signed-in session. Disable email confirmation in Supabase Auth and try again.');
-      }
-      return supabaseClient.from('owner_requests').insert({
-        user_uid: result.data.user.id,
-        owner_name: f.ownerName.trim(),
-        club_name: f.clubName.trim(),
-        mobile: mobile,
-        email: email
-      });
-    }).then(function (result) {
-      if (result.error) throw result.error;
+      if (!result.data.user) throw new Error('Supabase did not create the owner account.');
       ownerClaimPromise = null;
       pendingIntent = null;
       release();
@@ -1397,6 +1401,10 @@ function doOwnerSetup() {
       f.mode = 'login';
       f.error = '';
       state.ownerApprovalNotice = true;
+      if (!result.data.session) {
+        render();
+        return;
+      }
       return supabaseClient.auth.signOut().then(function (signOutResult) {
         if (signOutResult.error) throw signOutResult.error;
         render();
@@ -1517,16 +1525,12 @@ function refreshAdminRequests() {
   state.adminForm.error = '';
   render();
   supabaseClient.from('owner_requests')
-    .select('user_uid,owner_name,club_name,mobile,email,status,created_at')
-    .eq('status', 'pending').order('created_at')
+    .select('user_uid,owner_name,club_name,mobile,email,status,created_at,reviewed_at,archived')
+    .eq('archived', state.adminShowArchived)
+    .order('created_at', { ascending: false })
     .then(function (result) {
       if (result.error) throw result.error;
-      state.adminRequests = (result.data || []).map(function (entry) {
-        return {
-          uid: entry.user_uid, ownerName: entry.owner_name, clubName: entry.club_name,
-          mobile: entry.mobile, createdAt: entry.created_at
-        };
-      });
+      state.adminRequests = (result.data || []).map(mapOwnerRequest);
       state.adminForm.refreshing = false;
       render();
     })
@@ -1556,6 +1560,102 @@ function reviewOwnerRequest(uid, action) {
       state.adminForm.error = authErrorText(err);
       render();
     });
+}
+
+function openEditOwner(uid) {
+  if (!state.adminAuthenticated) return;
+  const entry = state.adminRequests.find(function (request) { return request.uid === uid; });
+  if (!entry) return;
+  state.modal = { type: 'adminEditOwner', id: uid };
+  state.modalForm = {
+    ownerName: entry.ownerName || '',
+    clubName: entry.clubName || '',
+    mobile: entry.mobile || '',
+    email: entry.email || '',
+    password: '',
+    busy: false,
+    error: ''
+  };
+  render();
+}
+
+function saveAdminOwnerEdit() {
+  const f = state.modalForm;
+  const uid = state.modal && state.modal.id;
+  if (!state.adminAuthenticated || !uid || !f || f.busy) return;
+  const email = cleanEmail(f.email);
+  const mobile = normalizedMobile(f.mobile);
+  const password = String(f.password || '');
+  if (!f.ownerName.trim() || !f.clubName.trim() || !validEmail(email) ||
+      !/^\d{8,15}$/.test(mobile) || (password && password.length < 6)) {
+    f.error = 'Enter a name, club name, valid email and mobile number. A new password must be at least 6 characters.';
+    render();
+    return;
+  }
+  f.busy = true;
+  f.error = '';
+  render();
+  manageAccount('admin-owner-edit', {
+    ownerUid: uid,
+    ownerName: f.ownerName.trim(),
+    clubName: f.clubName.trim(),
+    mobile: mobile,
+    email: email,
+    password: password
+  }).then(function () {
+    state.modal = null;
+    state.modalForm = null;
+    refreshAdminRequests();
+  }).catch(function (err) {
+    f.busy = false;
+    f.error = authErrorText(err);
+    render();
+  });
+}
+
+function setOwnerRequestArchived(uid, archive) {
+  if (!state.adminAuthenticated || state.adminForm.actionBusyUid) return;
+  const entry = state.adminRequests.find(function (request) { return request.uid === uid; });
+  if (!entry) return;
+  if (!confirm((archive ? 'Archive' : 'Restore') + ' the approval history for ' + entry.clubName + '?')) return;
+  state.adminForm.actionBusyUid = uid;
+  state.adminForm.error = '';
+  render();
+  supabaseClient.rpc('set_owner_request_archived', {
+    request_uid: uid,
+    archive_request: archive
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    state.adminForm.actionBusyUid = '';
+    refreshAdminRequests();
+  }).catch(function (err) {
+    state.adminForm.actionBusyUid = '';
+    state.adminForm.error = authErrorText(err);
+    render();
+  });
+}
+
+function setOwnerAccess(uid, restore) {
+  if (!state.adminAuthenticated || state.adminForm.actionBusyUid) return;
+  const entry = state.adminRequests.find(function (request) { return request.uid === uid; });
+  if (!entry) return;
+  const actionText = restore ? 'Restore access to' : 'Revoke access for';
+  if (!confirm(actionText + ' ' + entry.ownerName + '? The club and its ledger history will be preserved.')) return;
+  state.adminForm.actionBusyUid = uid;
+  state.adminForm.error = '';
+  render();
+  supabaseClient.rpc('set_owner_access', {
+    request_uid: uid,
+    restore_access: restore
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    state.adminForm.actionBusyUid = '';
+    refreshAdminRequests();
+  }).catch(function (err) {
+    state.adminForm.actionBusyUid = '';
+    state.adminForm.error = authErrorText(err);
+    render();
+  });
 }
 
 function manageAccount(action, details) {
@@ -1699,7 +1799,7 @@ function computeTotals() {
 }
 
 function renderApp() {
-  if (adminRoute) return renderAdminPage();
+  if (adminRoute) return renderAdminPage() + (state.modal ? renderModal() : '');
   const sess = state.session;
   if (sess.status === 'loading') return `<div class="splash">Club Ledger</div>`;
   if (sess.status === 'out') return renderLogin();
@@ -1713,6 +1813,48 @@ function renderApp() {
     </div>
     ${state.modal ? renderModal() : ''}
   `;
+}
+
+function adminRequestMonth(entry) {
+  const date = new Date(Number(entry.createdAt));
+  if (!Number.isFinite(date.getTime())) return { key: 'unknown', label: 'Date unavailable' };
+  return {
+    key: date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0'),
+    label: date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+  };
+}
+
+function renderAdminRequestGroups(entries) {
+  const grouped = {};
+  entries.forEach(function (entry) {
+    const month = adminRequestMonth(entry);
+    if (!grouped[month.key]) grouped[month.key] = { label: month.label, entries: [] };
+    grouped[month.key].entries.push(entry);
+  });
+  return Object.keys(grouped).sort().reverse().map(function (key) {
+    const group = grouped[key];
+    return `<section class="admin-month-group">
+      <h4 class="section-title">${escapeHtml(group.label)}</h4>
+      ${group.entries.map(function (entry) {
+        const busy = state.adminForm.actionBusyUid === entry.uid;
+        const status = entry.status || 'pending';
+        return `<div class="followup-item">
+          <div>
+            <p class="followup-name">${escapeHtml(entry.clubName)}</p>
+            <p class="followup-due">Owner: ${escapeHtml(entry.ownerName)} · ${escapeHtml(entry.mobile)} · ${escapeHtml(entry.email || '')}</p>
+            <p class="followup-due">Status: ${escapeHtml(status)} · Requested ${formatStamp(entry.createdAt)}${entry.reviewedAt ? ' · Reviewed ' + formatStamp(entry.reviewedAt) : ''}</p>
+          </div>
+          <div class="row-actions">
+            ${!state.adminShowArchived && status === 'pending' ? `<button class="btn-pay-mini" data-action="approveOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Approve</button><button class="btn-remind" data-action="rejectOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Reject</button>` : ''}
+            ${!state.adminShowArchived && status === 'approved' ? `<button class="btn-remind" data-action="revokeOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Revoke access</button>` : ''}
+            ${!state.adminShowArchived && status === 'revoked' ? `<button class="btn-pay-mini" data-action="restoreOwnerAccess" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Restore access</button>` : ''}
+            <button class="btn-remind" data-action="editOwnerRequest" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Edit</button>
+            <button class="btn-remind" data-action="${state.adminShowArchived ? 'restoreOwnerRequest' : 'archiveOwnerRequest'}" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>${state.adminShowArchived ? 'Restore history' : 'Archive'}</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </section>`;
+  }).join('');
 }
 
 function renderAdminPage() {
@@ -1734,7 +1876,12 @@ function renderAdminPage() {
       </div>
     `;
   }
-  const requests = state.adminRequests;
+  const monthFilter = form.monthFilter || '';
+  const requests = state.adminRequests.filter(function (entry) {
+    return !monthFilter || adminRequestMonth(entry).key === monthFilter;
+  });
+  const pending = requests.filter(function (entry) { return entry.status === 'pending'; });
+  const history = requests.filter(function (entry) { return entry.status !== 'pending'; });
   return `
     <div class="app">
       <header class="header">
@@ -1742,25 +1889,26 @@ function renderAdminPage() {
         <button class="btn-primary-sm" data-action="adminLogout">Log out</button>
       </header>
       <main class="main">
+        ${form.error ? `<div class="auth-error" role="alert">${escapeHtml(form.error)}</div>` : ''}
         <div class="card">
-          <h3 class="section-title">Pending owner requests (${requests.length})</h3>
-          ${requests.length ? requests.map(function (entry) {
-            const busy = form.actionBusyUid === entry.uid;
-            return `<div class="followup-item">
-              <div>
-                <p class="followup-name">${escapeHtml(entry.clubName)}</p>
-                <p class="followup-due">Owner: ${escapeHtml(entry.ownerName)} · ${escapeHtml(entry.mobile)} · ${escapeHtml(entry.email || '')}</p>
-                <p class="followup-due">Requested ${formatStamp(entry.createdAt)}</p>
-              </div>
-              <div class="row-actions">
-                <button class="btn-pay-mini" data-action="approveOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>${busy ? 'Saving…' : 'Approve'}</button>
-                <button class="btn-remind" data-action="rejectOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Reject</button>
-              </div>
-            </div>`;
-          }).join('') : '<p class="empty-state-text">No owner requests are waiting for approval.</p>'}
-          ${form.error ? `<div class="auth-error" role="alert">${escapeHtml(form.error)}</div>` : ''}
-          <button class="link-btn" data-action="refreshOwnerRequests">Refresh requests</button>
+          <h3 class="section-title">Owner approval history</h3>
+          <div class="field"><label for="admin-month-filter">Filter by month</label>
+            <input id="admin-month-filter" type="month" data-bind="adminForm.monthFilter" value="${escapeHtml(monthFilter)}">
+          </div>
+          <button class="link-btn" data-action="toggleArchivedOwnerRequests">${state.adminShowArchived ? 'Show active requests and history' : 'Show archived history'}</button>
+          <button class="link-btn" data-action="refreshOwnerRequests" ${form.refreshing ? 'disabled' : ''}>${form.refreshing ? 'Refreshing…' : 'Refresh requests'}</button>
         </div>
+        <div class="card">
+          <h3 class="section-title">${state.adminShowArchived ? 'Archived owner requests' : 'Pending owner requests'} (${state.adminShowArchived ? requests.length : pending.length})</h3>
+          ${state.adminShowArchived
+            ? (requests.length ? renderAdminRequestGroups(requests) : '<p class="empty-state-text">No archived owner requests.</p>')
+            : (pending.length ? renderAdminRequestGroups(pending) : '<p class="empty-state-text">No owner requests are waiting for approval.</p>')}
+        </div>
+        ${!state.adminShowArchived ? `<div class="card">
+          <h3 class="section-title">Past approvals &amp; requests (${history.length})</h3>
+          ${history.length ? renderAdminRequestGroups(history) : '<p class="empty-state-text">No approval history for this month.</p>'}
+        </div>
+        ` : ''}
       </main>
     </div>
   `;
@@ -2803,7 +2951,30 @@ function renderModal() {
   if (m.type === 'changePw') return renderChangePwModal();
   if (m.type === 'addOwner') return renderAddOwnerModal();
   if (m.type === 'linkRegistration') return renderLinkRegistrationModal(m);
+  if (m.type === 'adminEditOwner') return renderAdminOwnerEditModal();
   return '';
+}
+
+function renderAdminOwnerEditModal() {
+  const f = state.modalForm || {};
+  const valid = f.ownerName && f.clubName && validEmail(f.email) &&
+    /^\d{8,15}$/.test(normalizedMobile(f.mobile)) &&
+    (!f.password || String(f.password).length >= 6) && !f.busy;
+  return `
+    <div class="modal-overlay">
+      <form class="modal-card" data-form="adminOwnerEdit" novalidate>
+        <div class="modal-head"><h2>Edit owner account</h2><button type="button" data-action="closeModal">${ICONS.x}</button></div>
+        <p class="modal-sub">Updates the owner's sign-in email and club details. Leave password blank to keep the current password.</p>
+        ${f.error ? `<div class="auth-error" role="alert">${escapeHtml(f.error)}</div>` : ''}
+        <div class="field"><label>Owner name</label><input type="text" autocomplete="name" data-bind="modalForm.ownerName" value="${escapeHtml(f.ownerName)}"></div>
+        <div class="field"><label>Nutrition club name</label><input type="text" data-bind="modalForm.clubName" value="${escapeHtml(f.clubName)}"></div>
+        <div class="field"><label>Mobile number</label><input type="tel" inputmode="tel" data-bind="modalForm.mobile" value="${escapeHtml(f.mobile)}"></div>
+        <div class="field"><label>Login email</label><input type="email" inputmode="email" autocomplete="email" data-bind="modalForm.email" value="${escapeHtml(f.email)}"></div>
+        <div class="field"><label>Set new password (optional)</label><input type="password" autocomplete="new-password" data-bind="modalForm.password" value="${escapeHtml(f.password)}" placeholder="Leave blank to keep current password"></div>
+        <button class="btn-save" type="submit" ${valid ? '' : 'disabled'}>${f.busy ? 'Saving…' : 'Save owner details'}</button>
+      </form>
+    </div>
+  `;
 }
 
 function renderLinkRegistrationModal(m) {
@@ -3210,6 +3381,15 @@ function handleAction(action, target) {
     case 'approveOwner': reviewOwnerRequest(id, 'approve'); break;
     case 'rejectOwner': reviewOwnerRequest(id, 'reject'); break;
     case 'refreshOwnerRequests': refreshAdminRequests(); break;
+    case 'editOwnerRequest': openEditOwner(id); break;
+    case 'archiveOwnerRequest': setOwnerRequestArchived(id, true); break;
+    case 'restoreOwnerRequest': setOwnerRequestArchived(id, false); break;
+    case 'revokeOwner': setOwnerAccess(id, false); break;
+    case 'restoreOwnerAccess': setOwnerAccess(id, true); break;
+    case 'toggleArchivedOwnerRequests':
+      state.adminShowArchived = !state.adminShowArchived;
+      refreshAdminRequests();
+      break;
     case 'adminLogout':
       state.adminAuthenticated = false;
       state.adminRequests = [];
@@ -4024,6 +4204,7 @@ document.body.addEventListener('submit', function (e) {
   if (!form) return;
   e.preventDefault();
   if (form.dataset.form === 'adminLogin') doAdminLogin();
+  else if (form.dataset.form === 'adminOwnerEdit') saveAdminOwnerEdit();
   else if (form.dataset.form === 'ownerSetup') doOwnerSetup();
   else if (form.dataset.form === 'customerRegister') doCustomerRegister();
   else doLogin();
