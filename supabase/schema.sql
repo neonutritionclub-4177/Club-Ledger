@@ -31,10 +31,20 @@ create table if not exists public.owner_requests (
   email text not null default '',
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
   created_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
-  reviewed_at bigint
+  reviewed_at bigint,
+  archived boolean not null default false,
+  archived_at bigint
 );
 
 alter table public.owner_requests add column if not exists email text not null default '';
+alter table public.owner_requests add column if not exists archived boolean not null default false;
+alter table public.owner_requests add column if not exists archived_at bigint;
+alter table public.owner_requests drop constraint if exists owner_requests_status_check;
+alter table public.owner_requests add constraint owner_requests_status_check
+  check (status in ('pending', 'approved', 'rejected', 'revoked'));
+
+create index if not exists owner_requests_history_idx
+  on public.owner_requests (archived, created_at desc);
 
 create or replace function public.create_owner_request_from_auth()
 returns trigger
@@ -205,6 +215,126 @@ begin
 end;
 $$;
 
+create or replace function public.set_owner_request_archived(request_uid text, archive_request boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.is_platform_admin() then
+    raise exception 'Platform administrator access is required' using errcode = '42501';
+  end if;
+
+  update public.owner_requests
+    set archived = archive_request,
+        archived_at = case when archive_request
+          then (extract(epoch from clock_timestamp()) * 1000)::bigint
+          else null
+        end
+    where user_uid = request_uid;
+
+  if not found then
+    raise exception 'Owner request not found' using errcode = 'P0002';
+  end if;
+end;
+$$;
+
+create or replace function public.set_owner_access(request_uid text, restore_access boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  request_row public.owner_requests%rowtype;
+begin
+  if not public.is_platform_admin() then
+    raise exception 'Platform administrator access is required' using errcode = '42501';
+  end if;
+
+  select * into request_row
+    from public.owner_requests
+    where user_uid = request_uid
+    for update;
+
+  if not found then
+    raise exception 'Owner request not found' using errcode = 'P0002';
+  end if;
+
+  if restore_access and request_row.status <> 'revoked' then
+    raise exception 'Only a revoked owner can be restored' using errcode = 'P0001';
+  elsif not restore_access and request_row.status <> 'approved' then
+    raise exception 'Only an approved owner can be revoked' using errcode = 'P0001';
+  end if;
+
+  if restore_access then
+    update public.clubs set approved = true, name = request_row.club_name
+      where id = request_uid;
+    insert into public.club_owners (club_id, owner_uid, owner_name, mobile)
+      values (request_uid, request_uid, request_row.owner_name, request_row.mobile)
+      on conflict (club_id, owner_uid) do update
+        set owner_name = excluded.owner_name, mobile = excluded.mobile;
+    update public.owner_requests
+      set status = 'approved',
+          reviewed_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
+      where user_uid = request_uid;
+  else
+    update public.clubs set approved = false where id = request_uid;
+    delete from public.club_owners
+      where club_id = request_uid and owner_uid = request_uid;
+    update public.owner_requests
+      set status = 'revoked',
+          reviewed_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
+      where user_uid = request_uid;
+  end if;
+end;
+$$;
+
+create or replace function public.admin_update_owner_details(
+  actor_uid text,
+  request_uid text,
+  new_owner_name text,
+  new_club_name text,
+  new_mobile text,
+  new_email text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  request_row public.owner_requests%rowtype;
+begin
+  if not exists (
+    select 1 from public.platform_admins where user_uid = actor_uid
+  ) then
+    raise exception 'Platform administrator access is required' using errcode = '42501';
+  end if;
+
+  select * into request_row from public.owner_requests
+    where user_uid = request_uid for update;
+  if not found then
+    raise exception 'Owner request not found' using errcode = 'P0002';
+  end if;
+
+  update public.owner_requests
+    set owner_name = new_owner_name,
+        club_name = new_club_name,
+        mobile = new_mobile,
+        email = lower(new_email)
+    where user_uid = request_uid;
+
+  if request_row.status in ('approved', 'revoked') then
+    update public.clubs set name = new_club_name where id = request_uid;
+    update public.club_owners
+      set owner_name = new_owner_name, mobile = new_mobile
+      where club_id = request_uid and owner_uid = request_uid;
+  end if;
+end;
+$$;
+
 alter table public.clubs enable row level security;
 alter table public.club_owners enable row level security;
 alter table public.club_ledgers enable row level security;
@@ -228,10 +358,16 @@ revoke all on function public.is_platform_admin() from public, anon, authenticat
 revoke all on function public.is_club_owner(text) from public, anon, authenticated;
 revoke all on function public.is_club_customer(text, text) from public, anon, authenticated;
 revoke all on function public.review_owner_request(text, boolean) from public, anon, authenticated;
+revoke all on function public.set_owner_request_archived(text, boolean) from public, anon, authenticated;
+revoke all on function public.set_owner_access(text, boolean) from public, anon, authenticated;
+revoke all on function public.admin_update_owner_details(text, text, text, text, text, text) from public, anon, authenticated;
 grant execute on function public.is_platform_admin() to anon, authenticated;
 grant execute on function public.is_club_owner(text) to anon, authenticated;
 grant execute on function public.is_club_customer(text, text) to authenticated;
 grant execute on function public.review_owner_request(text, boolean) to authenticated;
+grant execute on function public.set_owner_request_archived(text, boolean) to authenticated;
+grant execute on function public.set_owner_access(text, boolean) to authenticated;
+grant execute on function public.admin_update_owner_details(text, text, text, text, text, text) to service_role;
 
 drop policy if exists "Approved clubs are visible" on public.clubs;
 create policy "Approved clubs are visible"
