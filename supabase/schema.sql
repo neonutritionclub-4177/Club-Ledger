@@ -1,0 +1,281 @@
+create table if not exists public.clubs (
+  id text primary key,
+  name text not null,
+  approved boolean not null default false,
+  created_at bigint not null default (extract(epoch from now()) * 1000)::bigint
+);
+
+create table if not exists public.club_owners (
+  club_id text not null references public.clubs(id) on delete cascade,
+  owner_uid text not null,
+  owner_name text not null default '',
+  mobile text not null default '',
+  created_at timestamptz not null default now(),
+  primary key (club_id, owner_uid)
+);
+
+alter table public.club_owners add column if not exists owner_name text not null default '';
+alter table public.club_owners add column if not exists mobile text not null default '';
+
+create table if not exists public.club_ledgers (
+  club_id text primary key references public.clubs(id) on delete cascade,
+  ledger jsonb not null default '{"customers":[],"orders":[],"lastModified":0}'::jsonb,
+  updated_at bigint not null default 0
+);
+
+create table if not exists public.owner_requests (
+  user_uid text primary key,
+  owner_name text not null,
+  club_name text not null,
+  mobile text not null,
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  created_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
+  reviewed_at bigint
+);
+
+create table if not exists public.customer_registrations (
+  user_uid text primary key,
+  club_id text not null references public.clubs(id) on delete cascade,
+  customer_name text not null,
+  mobile text not null,
+  status text not null default 'pending' check (status in ('pending', 'linked', 'rejected')),
+  linked_customer_id text,
+  created_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
+  updated_at bigint not null default (extract(epoch from now()) * 1000)::bigint,
+  unique (club_id, mobile)
+);
+
+create table if not exists public.customer_portals (
+  customer_uid text primary key,
+  club_id text not null references public.clubs(id) on delete cascade,
+  portal jsonb not null,
+  updated_at bigint not null default (extract(epoch from now()) * 1000)::bigint
+);
+
+create table if not exists public.platform_admins (
+  user_uid text primary key,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists owner_requests_pending_created_idx
+  on public.owner_requests (status, created_at);
+create index if not exists customer_registrations_club_status_idx
+  on public.customer_registrations (club_id, status, created_at);
+
+create or replace function public.is_platform_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.platform_admins
+    where user_uid = auth.uid()::text
+  );
+$$;
+
+create or replace function public.is_club_owner(target_club_id text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.club_owners
+    where club_id = target_club_id
+      and owner_uid = auth.uid()::text
+  );
+$$;
+
+create or replace function public.is_club_customer(target_customer_uid text, target_club_id text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_club_owner(target_club_id) and exists (
+    select 1
+    from public.customer_registrations
+    where user_uid = target_customer_uid
+      and club_id = target_club_id
+  );
+$$;
+
+create or replace function public.review_owner_request(request_uid text, approve boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  request_row public.owner_requests%rowtype;
+  now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint;
+begin
+  if not public.is_platform_admin() then
+    raise exception 'Platform administrator access is required' using errcode = '42501';
+  end if;
+
+  select *
+    into request_row
+    from public.owner_requests
+    where user_uid = request_uid
+    for update;
+
+  if not found then
+    raise exception 'Owner request not found' using errcode = 'P0002';
+  end if;
+  if request_row.status <> 'pending' then
+    raise exception 'Owner request is no longer pending' using errcode = 'P0001';
+  end if;
+
+  if approve then
+    insert into public.clubs (id, name, approved, created_at)
+    values (request_uid, request_row.club_name, true, now_ms)
+    on conflict (id) do update set name = excluded.name, approved = true;
+
+    insert into public.club_owners (club_id, owner_uid, owner_name, mobile)
+    values (request_uid, request_uid, request_row.owner_name, request_row.mobile)
+    on conflict (club_id, owner_uid) do update
+      set owner_name = excluded.owner_name, mobile = excluded.mobile;
+
+    insert into public.club_ledgers (club_id)
+    values (request_uid)
+    on conflict (club_id) do nothing;
+
+    update public.owner_requests
+      set status = 'approved', reviewed_at = now_ms
+      where user_uid = request_uid;
+  else
+    update public.owner_requests
+      set status = 'rejected', reviewed_at = now_ms
+      where user_uid = request_uid;
+  end if;
+
+  return jsonb_build_object('user_uid', request_uid, 'status', case when approve then 'approved' else 'rejected' end);
+end;
+$$;
+
+alter table public.clubs enable row level security;
+alter table public.club_owners enable row level security;
+alter table public.club_ledgers enable row level security;
+alter table public.owner_requests enable row level security;
+alter table public.customer_registrations enable row level security;
+alter table public.customer_portals enable row level security;
+alter table public.platform_admins enable row level security;
+
+revoke all on public.clubs, public.club_owners, public.club_ledgers,
+  public.owner_requests, public.customer_registrations, public.customer_portals,
+  public.platform_admins from anon, authenticated;
+grant select on public.clubs to anon;
+grant select on public.clubs, public.club_owners, public.owner_requests,
+  public.customer_registrations, public.customer_portals, public.platform_admins
+  to authenticated;
+grant select, insert, update on public.club_ledgers to authenticated;
+grant insert, update on public.customer_registrations
+  to authenticated;
+grant insert, update, delete on public.customer_portals to authenticated;
+revoke all on function public.is_platform_admin() from public, anon, authenticated;
+revoke all on function public.is_club_owner(text) from public, anon, authenticated;
+revoke all on function public.is_club_customer(text, text) from public, anon, authenticated;
+revoke all on function public.review_owner_request(text, boolean) from public, anon, authenticated;
+grant execute on function public.is_platform_admin() to anon, authenticated;
+grant execute on function public.is_club_owner(text) to anon, authenticated;
+grant execute on function public.is_club_customer(text, text) to authenticated;
+grant execute on function public.review_owner_request(text, boolean) to authenticated;
+
+drop policy if exists "Approved clubs are visible" on public.clubs;
+create policy "Approved clubs are visible"
+  on public.clubs for select to anon, authenticated
+  using (approved or public.is_club_owner(id) or public.is_platform_admin());
+
+drop policy if exists "Owners can read club memberships" on public.club_owners;
+create policy "Owners can read club memberships"
+  on public.club_owners for select to authenticated
+  using (owner_uid = auth.uid()::text or public.is_club_owner(club_id) or public.is_platform_admin());
+
+drop policy if exists "Club owners can access their ledger" on public.club_ledgers;
+create policy "Club owners can access their ledger"
+  on public.club_ledgers for all to authenticated
+  using (public.is_club_owner(club_id))
+  with check (public.is_club_owner(club_id));
+
+drop policy if exists "Users can create their own owner request" on public.owner_requests;
+create policy "Users can create their own owner request"
+  on public.owner_requests for insert to authenticated
+  with check (user_uid = auth.uid()::text and status = 'pending');
+drop policy if exists "Users and admins can read owner requests" on public.owner_requests;
+create policy "Users and admins can read owner requests"
+  on public.owner_requests for select to authenticated
+  using (user_uid = auth.uid()::text or public.is_platform_admin());
+
+drop policy if exists "Customers and club owners can read registrations" on public.customer_registrations;
+create policy "Customers and club owners can read registrations"
+  on public.customer_registrations for select to authenticated
+  using (user_uid = auth.uid()::text or public.is_club_owner(club_id));
+drop policy if exists "Customers can submit their registration" on public.customer_registrations;
+create policy "Customers can submit their registration"
+  on public.customer_registrations for insert to authenticated
+  with check (
+    user_uid = auth.uid()::text
+    and status = 'pending'
+    and linked_customer_id is null
+    and exists (
+      select 1 from public.clubs
+      where clubs.id = customer_registrations.club_id
+        and clubs.approved
+    )
+  );
+drop policy if exists "Club owners can link or reject registrations" on public.customer_registrations;
+create policy "Club owners can link or reject registrations"
+  on public.customer_registrations for update to authenticated
+  using (public.is_club_owner(club_id))
+  with check (public.is_club_owner(club_id));
+
+drop policy if exists "Customers and club owners can read portal cards" on public.customer_portals;
+create policy "Customers and club owners can read portal cards"
+  on public.customer_portals for select to authenticated
+  using (customer_uid = auth.uid()::text or public.is_club_owner(club_id));
+drop policy if exists "Club owners can update portal cards" on public.customer_portals;
+create policy "Club owners can update portal cards"
+  on public.customer_portals for insert to authenticated
+  with check (public.is_club_owner(club_id) and public.is_club_customer(customer_uid, club_id));
+drop policy if exists "Club owners can edit portal cards" on public.customer_portals;
+create policy "Club owners can edit portal cards"
+  on public.customer_portals for update to authenticated
+  using (public.is_club_owner(club_id) and public.is_club_customer(customer_uid, club_id))
+  with check (public.is_club_owner(club_id) and public.is_club_customer(customer_uid, club_id));
+drop policy if exists "Club owners can remove portal cards" on public.customer_portals;
+create policy "Club owners can remove portal cards"
+  on public.customer_portals for delete to authenticated
+  using (public.is_club_owner(club_id));
+
+drop policy if exists "Platform admins can read their own admin record" on public.platform_admins;
+create policy "Platform admins can read their own admin record"
+  on public.platform_admins for select to authenticated
+  using (user_uid = auth.uid()::text);
+
+do $$
+declare
+  table_name text;
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    foreach table_name in array array['club_ledgers', 'customer_registrations', 'customer_portals']
+    loop
+      if not exists (
+        select 1
+        from pg_publication_tables
+        where pubname = 'supabase_realtime'
+          and schemaname = 'public'
+          and tablename = table_name
+      ) then
+        execute format('alter publication supabase_realtime add table public.%I', table_name);
+      end if;
+    end loop;
+  end if;
+end
+$$;

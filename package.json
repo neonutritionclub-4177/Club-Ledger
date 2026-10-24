@@ -1,0 +1,21 @@
+{
+  "name": "club-ledger",
+  "version": "13.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --test tests/app-smoke.test.js",
+    "supabase:login": "supabase login",
+    "supabase:link": "supabase link",
+    "supabase:deploy": "supabase functions deploy manage-account"
+  },
+  "devDependencies": {
+    "supabase": "2.122.0",
+    "vite": "6.4.5"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.86.0"
+  }
+}
