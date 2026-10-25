@@ -1,0 +1,9 @@
+functions/.env*
+!functions/.env.example
+functions/node_modules/
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+supabase/.temp/

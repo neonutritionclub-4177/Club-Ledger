@@ -14,7 +14,8 @@ function createApp() {
     activeElement: null,
     body: { addEventListener: (name, callback) => { listeners[name] = callback; } },
     documentElement: { dataset: {} },
-    getElementById: () => root
+    getElementById: () => root,
+    querySelector: () => null
   };
   const window = { addEventListener() {}, crypto: require('node:crypto').webcrypto };
   const context = {
@@ -50,7 +51,7 @@ function createApp() {
       renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP
     };
   `, context);
-  return { api: context.testApi, context };
+  return { api: context.testApi, context, root, listeners };
 }
 
 test('order quantities affect totals and deleted lines are excluded', () => {
@@ -244,6 +245,27 @@ test('admin history can show archived rows and the owner edit form', () => {
   assert.match(modal, /data-form="adminOwnerEdit"/);
   assert.match(modal, /Set new password \(optional\)/);
   assert.match(modal, /Leave blank to keep (?:the )?current password/);
+});
+
+test('typing into a bound edit field updates state without rebuilding the page', () => {
+  const { api, listeners, root } = createApp();
+  api.state.modal = { type: 'adminEditOwner', id: 'owner-1' };
+  api.state.modalForm = {
+    ownerName: '', clubName: '', mobile: '', email: '',
+    password: '', busy: false, error: ''
+  };
+  root.innerHTML = '<input value="">';
+  listeners.input({
+    target: { dataset: { bind: 'modalForm.ownerName' }, value: 'N' }
+  });
+  listeners.input({
+    target: { dataset: { bind: 'modalForm.ownerName' }, value: 'Ne' }
+  });
+  listeners.input({
+    target: { dataset: { bind: 'modalForm.ownerName' }, value: 'Neo' }
+  });
+  assert.equal(api.state.modalForm.ownerName, 'Neo');
+  assert.equal(root.innerHTML, '<input value="">');
 });
 
 test('registration-only customer migration does not create an unpriced shake pack', () => {

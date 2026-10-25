@@ -12,10 +12,11 @@ Edge Function. Firebase is not used. Vercel only hosts the static PWA.
    `supabase_realtime` publication is absent.
 3. In **Authentication → Providers**, enable **Email** and allow email/password
    signups.
-4. In **Authentication → Settings**, turn off email confirmation. This is
-   required because the owner and customer accounts use private, non-deliverable
-   email identities derived from mobile numbers. If confirmation remains on,
-   account creation may stop before the app can save the owner request.
+4. In **Authentication → Settings**, turn off email confirmation so customers
+   can submit their club registration immediately. Owner requests are created
+   automatically by a database trigger, even if confirmation is enabled.
+   Users sign in with real email addresses; mobile numbers remain contact and
+   matching details.
 5. Create a local environment file from the template:
 
    ```powershell
@@ -91,19 +92,24 @@ npm run preview
 ## 5. Deploy the Supabase Edge Function
 
 The `manage-account` function securely creates, resets, and removes customer
-logins and can add another owner. It verifies the caller's Supabase session
-and confirms that the caller owns the requested club.
+logins and can add another owner. It also handles platform-admin edits to owner
+email/password and profile details. It verifies the caller's Supabase session
+and checks platform-admin or club-owner privileges for each operation.
 
 Run these commands from the project directory in Windows PowerShell:
 
 ```powershell
-npm run supabase:login
-npm run supabase:link -- --project-ref YOUR-SUPABASE-PROJECT-REF
-npm run supabase:deploy
+npm.cmd run supabase:login
+npm.cmd run supabase:link -- --project-ref YOUR-SUPABASE-PROJECT-REF
+npm.cmd run supabase:deploy -- --project-ref YOUR-SUPABASE-PROJECT-REF
 ```
 
 Supabase supplies the function's URL, anon key, and service-role key in its
 runtime. Do not add the service-role key to Vercel or commit it to GitHub.
+After changing this function, deploy it again. If the app shows
+“Failed to send a request to the Edge Function,” confirm you deployed
+`manage-account` to the same Supabase project whose URL is configured in
+Vercel, then redeploy the frontend and retry.
 
 ## 6. Deploy the PWA on Vercel
 
@@ -131,15 +137,15 @@ No Firebase setup or Firebase domain allowlisting is needed.
 
 ### If owner signup or admin login fails
 
-- **Owner signup:** Confirm Email/password signups are enabled, email
-  confirmation is disabled, and the latest `supabase/schema.sql` has been run.
-- Owner signup creates the Auth account first and inserts the owner request
-  only after Supabase returns a session. A rate-limit or email-confirmation
-  failure therefore leaves the admin request list empty.
+- **Owner signup:** Confirm Email/password signups are enabled and the latest
+  `supabase/schema.sql` has been run. The schema installs a trigger that saves
+  the owner request automatically as part of Auth account creation; no manual
+  SQL insert is needed for new signups. An Auth validation or rate-limit
+  failure still means the account and request were not created.
 - **“Too many tries” during owner signup:** Stop retrying and let Supabase's
   auth/email limit reset. Check **Authentication → Settings** and turn off
-  email confirmation before retrying; these phone-derived account addresses
-  cannot receive confirmation messages.
+  email confirmation before retrying. Use a real email address with a valid
+  format; the app no longer invents an email from the phone number.
 - **Check for an incomplete owner signup:** Run this in Supabase SQL Editor.
 
   ```sql
@@ -150,15 +156,23 @@ No Firebase setup or Firebase domain allowlisting is needed.
     r.status as owner_request_status
   from auth.users u
   left join public.owner_requests r on r.user_uid = u.id::text
-  where u.email like '%@owner.club-ledger.app'
+  where lower(u.email) = lower('OWNER-EMAIL@example.com')
   order by u.created_at desc;
   ```
 
-  If a user has no matching `owner_request_status`, signup did not reach the
-  request insert. After fixing the Auth settings and waiting for the rate
-  limit to reset, remove only that incomplete Auth user in **Authentication →
-  Users** before reusing the same mobile number. Do not remove users that have
-  an owner request.
+  If a user created before the trigger was installed has no matching request,
+  the trigger cannot backfill it. Add that one existing request once using its
+  Auth UUID and the correct owner details:
+
+  ```sql
+  insert into public.owner_requests
+    (user_uid, owner_name, club_name, mobile, email, status)
+  values
+    ('PASTE-EXISTING-AUTH-USER-UUID', 'OWNER NAME', 'CLUB NAME',
+     '+91 MOBILE NUMBER', 'OWNER-EMAIL@example.com', 'pending');
+  ```
+
+  New signups after installing the trigger do not need this manual insert.
 - **Admin page shows Vercel 404:** Deploy the commit containing the current
   `vercel.json` rewrite rules. The admin route is part of the app; it is not a
   separate Vercel serverless backend.
@@ -168,12 +182,25 @@ No Firebase setup or Firebase domain allowlisting is needed.
 
 ## 7. Owner and customer registration
 
-- Owners register with name, club name, mobile number, and password. Their
-  request stays pending until a platform admin approves it.
-- Customers choose an approved club, enter their name and mobile number, and
-  wait for that club's owner to link their registration to a ledger record.
+- Owners register with name, club name, email, mobile number, and password.
+  The database automatically adds their request to the admin queue. Their
+  request stays pending until a platform admin approves it in `/admin/login`.
+- The admin portal displays requests and approvals month-wise. Admins can edit
+  owner name, club name, mobile, login email, and optionally set a new
+  password. Admins can archive/restore history entries and revoke/restore
+  owner access. Revoking removes the owner's membership and hides the club
+  from customer signup, but preserves the club and ledger data; restoring
+  access makes the existing data available again. Archive is reversible and
+  does not delete the owner's Auth account or records.
+- Customers choose an approved club, enter their name, email, and mobile
+  number, and wait for that club's owner to link their registration to a ledger
+  record.
 - Club owners can create customer logins from customer records. Account
   management runs through the deployed Edge Function.
+- Existing logins created with phone-derived or placeholder email addresses
+  are not converted automatically. Have the owner remove and recreate a
+  customer login with the customer's real email; owners with incomplete signup
+  attempts should register again using a real email address.
 
 Keep the Supabase RLS policies from `schema.sql` enabled. Do not grant clients
 access to the Supabase service-role key.
