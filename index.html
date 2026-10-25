@@ -540,6 +540,7 @@ let ownerClaimPromise = null;
 let pendingIntent = null;       // which login tab the user pressed ('owner' | 'customer')
 let portalPrimed = false;
 const portalSig = {};           // uid -> last pushed portal JSON (skip unchanged writes)
+let boundRenderTimer = null;
 
 function loadLastRole() { try { return localStorage.getItem('clubLedgerLoginRole') === 'owner' ? 'owner' : 'customer'; } catch (e) { return 'customer'; } }
 function loadTheme() { try { return localStorage.getItem('clubLedgerTheme') === 'dark' ? 'dark' : 'light'; } catch (e) { return 'light'; } }
@@ -1079,6 +1080,9 @@ function randomPassword() {
 }
 function authErrorText(err) {
   const code = (err && err.code) || '';
+  if (code === 'edge_function_unavailable') {
+    return 'The account-management function is unavailable. Deploy the latest manage-account function in Supabase, then try again.';
+  }
   if (code === 'invalid_credentials' || code === 'user_not_found' || code === 'invalid-login-credentials') {
     const hint = state.authForm.role === 'owner' ? ' Customer? Use the Customer tab.' : ' Owner? Use the Owner tab.';
     return 'Wrong email or password.' + (state.session.status !== 'in' ? hint : '');
@@ -1613,6 +1617,92 @@ function saveAdminOwnerEdit() {
   });
 }
 
+function updateBoundFormControls() {
+  const f = state.modalForm;
+  const modal = state.modal;
+  if (!f || !modal) return;
+  let action = '';
+  let valid = true;
+
+  switch (modal.type) {
+    case 'adminEditOwner':
+      action = 'adminOwnerEdit';
+      valid = Boolean(f.ownerName && f.ownerName.trim() && f.clubName && f.clubName.trim() &&
+        validEmail(f.email) && /^\d{8,15}$/.test(normalizedMobile(f.mobile)) &&
+        (!f.password || String(f.password).length >= 6) && !f.busy);
+      break;
+    case 'addCustomer':
+    case 'editCustomer':
+      action = modal.type === 'addCustomer' ? 'saveAddCustomer' : 'saveEditCustomer';
+      valid = Boolean(f.name && f.name.trim());
+      if (!f.registrationOnly) {
+        valid = valid && f.totalShakes !== '' && Number(f.totalShakes) > 0 &&
+          f.cost !== '' && Number(f.cost) >= 0 &&
+          (modal.type === 'editCustomer' ||
+            (f.remainingShakes !== '' && Number(f.remainingShakes) >= 0 &&
+              Number(f.remainingShakes) <= Number(f.totalShakes)));
+      }
+      break;
+    case 'payment':
+      action = 'savePayment';
+      valid = Number(f.amount) > 0;
+      break;
+    case 'quickPayment':
+      action = 'saveQuickPayment';
+      valid = activeCustomers().some(function (customer) { return customer.id === f.customerId; }) && Number(f.amount) > 0;
+      break;
+    case 'renew':
+      action = 'saveRenew';
+      valid = f.totalShakes !== '' && Number(f.totalShakes) > 0 && f.cost !== '' && Number(f.cost) >= 0;
+      break;
+    case 'custLogin':
+      action = 'saveCustLogin';
+      valid = (modal.mode === 'reset' || validEmail(f.email)) && String(f.password).length >= 6 && !f.busy;
+      break;
+    case 'changePw':
+      action = 'saveChangePw';
+      valid = Boolean(f.current && String(f.next).length >= 6 && f.next === f.next2 && !f.busy);
+      break;
+    case 'addOwner':
+      action = 'saveAddOwner';
+      valid = validEmail(f.email) && /^\d{8,15}$/.test(normalizedMobile(f.username)) &&
+        String(f.password).length >= 6 && !f.busy;
+      break;
+    case 'addOrder':
+    case 'editOrder':
+      action = modal.type === 'addOrder' ? 'saveAddOrder' : 'saveEditOrder';
+      valid = Boolean(f.customerName && f.customerName.trim()) &&
+        (f.items || []).some(function (item) {
+          return item.name.trim() && Number(item.price) > 0 &&
+            Number.isInteger(Number(item.quantity)) && Number(item.quantity) > 0;
+        });
+      break;
+    case 'orderPayment':
+      action = 'saveOrderPayment';
+      valid = Number(f.amount) > 0;
+      break;
+    default:
+      return;
+  }
+
+  const button = document.querySelector('[data-form="adminOwnerEdit"] [type="submit"]') ||
+    document.querySelector('[data-action="' + action + '"]');
+  if (button) button.disabled = !valid;
+
+  if (modal.type === 'addOrder' || modal.type === 'editOrder') {
+    const total = (f.items || []).reduce(function (sum, item) {
+      return sum + (Number(item.price) || 0) * (Number(item.quantity) || 1);
+    }, 0);
+    const totalElement = document.querySelector('.order-total-value');
+    if (totalElement) totalElement.textContent = formatCurrency(total);
+  }
+}
+
+function scheduleBoundRender() {
+  clearTimeout(boundRenderTimer);
+  boundRenderTimer = setTimeout(render, 300);
+}
+
 function setOwnerRequestArchived(uid, archive) {
   if (!state.adminAuthenticated || state.adminForm.actionBusyUid) return;
   const entry = state.adminRequests.find(function (request) { return request.uid === uid; });
@@ -1664,6 +1754,12 @@ function manageAccount(action, details) {
   }).then(function (result) {
     if (result.error) {
       const context = result.error.context;
+      if (result.error.name === 'FunctionsFetchError' ||
+          /failed to send a request to the edge function/i.test(result.error.message || '')) {
+        const err = new Error('The account-management function is unavailable. Deploy the latest manage-account function in Supabase.');
+        err.code = 'edge_function_unavailable';
+        throw err;
+      }
       if (context && typeof context.clone === 'function') {
         return context.clone().json().then(function (payload) {
           const err = new Error(payload && payload.error || result.error.message);
@@ -4171,7 +4267,11 @@ document.body.addEventListener('input', function (e) {
   const target = e.target;
   if (target.dataset && target.dataset.bind) {
     setPath(state, target.dataset.bind, target.value);
-    render();
+    updateBoundFormControls();
+    if (target.dataset.bind === 'search' || target.dataset.bind === 'orderSearch' ||
+        target.dataset.bind === 'adminForm.monthFilter') {
+      scheduleBoundRender();
+    }
   }
 });
 
@@ -4194,7 +4294,8 @@ document.body.addEventListener('change', function (e) {
   }
   if (e.target.dataset && e.target.dataset.bind) {
     setPath(state, e.target.dataset.bind, e.target.value);
-    render();
+    updateBoundFormControls();
+    if (e.target.tagName === 'SELECT' || e.target.type === 'month') render();
   }
 });
 
