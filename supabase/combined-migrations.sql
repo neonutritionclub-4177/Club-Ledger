@@ -235,7 +235,7 @@ set search_path = ''
 as $$
 declare
   target_club_id text;
-  customer_uid text;
+  v_customer_uid text;
   settings_row public.club_payment_settings%rowtype;
   pack_shakes integer;
   pack_days integer;
@@ -250,26 +250,26 @@ begin
     raise exception 'Club owner access is required' using errcode = '42501';
   end if;
 
-  select entry #>> '{login,uid}' into customer_uid
+  select entry #>> '{login,uid}' into v_customer_uid
     from public.club_ledgers ledgers,
       lateral jsonb_array_elements(coalesce(ledgers.ledger -> 'customers', '[]'::jsonb)) as entries(entry)
     where ledgers.club_id = target_club_id
       and entry ->> 'id' = target_customer_id
       and coalesce(entry ->> 'deleted', 'false') <> 'true'
     limit 1;
-  if customer_uid is null or not exists (
+  if v_customer_uid is null or not exists (
     select 1 from public.customer_registrations registration
-    where registration.user_uid = customer_uid
+    where registration.user_uid = v_customer_uid
       and registration.club_id = target_club_id
       and registration.status = 'linked'
   ) then
     raise exception 'A linked customer login is required for in-app payment requests' using errcode = 'P0001';
   end if;
 
-  perform pg_advisory_xact_lock(hashtextextended(customer_uid, 0));
+  perform pg_advisory_xact_lock(hashtextextended(v_customer_uid, 0));
   if exists (
     select 1 from public.pack_payment_requests requests
-    where requests.customer_uid = customer_uid
+    where requests.customer_uid = v_customer_uid
       and requests.status in ('pending', 'payment_submitted')
   ) then
     raise exception 'This customer already has an active pack payment request' using errcode = 'P0001';
@@ -298,7 +298,7 @@ begin
     id, club_id, customer_uid, customer_id, pack_type, total_shakes,
     duration_days, amount, upi_id, status, created_at, updated_at
   ) values (
-    request_id, target_club_id, customer_uid, target_customer_id, target_pack_type,
+    request_id, target_club_id, v_customer_uid, target_customer_id, target_pack_type,
     pack_shakes, pack_days, pack_price, settings_row.upi_id, 'pending', now_ms, now_ms
   );
   return jsonb_build_object('id', request_id, 'status', 'pending', 'amount', pack_price);
@@ -349,6 +349,26 @@ begin
     raise exception 'This payment request can no longer be declined' using errcode = 'P0001';
   end if;
   return jsonb_build_object('id', request_id, 'status', 'declined');
+end;
+$$;
+
+create or replace function public.delete_customer_pack_request(target_request_id text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  removed_id text;
+begin
+  delete from public.pack_payment_requests requests
+    where requests.id = target_request_id
+      and public.is_club_owner(requests.club_id)
+    returning requests.id into removed_id;
+  if removed_id is null then
+    raise exception 'Payment request not found or owner access is required' using errcode = '42501';
+  end if;
+  return jsonb_build_object('id', removed_id, 'removed', true);
 end;
 $$;
 
@@ -503,10 +523,12 @@ revoke all on function public.create_owner_pack_offer(text, text, text) from pub
 revoke all on function public.create_owner_pack_request(text, text, text, integer, integer, numeric) from public, anon, authenticated;
 revoke all on function public.submit_customer_pack_payment(text, text) from public, anon, authenticated;
 revoke all on function public.decline_customer_pack_request(text) from public, anon, authenticated;
+revoke all on function public.delete_customer_pack_request(text) from public, anon, authenticated;
 revoke all on function public.review_customer_pack_payment(text, boolean) from public, anon, authenticated;
 grant execute on function public.create_owner_pack_request(text, text, text, integer, integer, numeric) to authenticated;
 grant execute on function public.submit_customer_pack_payment(text, text) to authenticated;
 grant execute on function public.decline_customer_pack_request(text) to authenticated;
+grant execute on function public.delete_customer_pack_request(text) to authenticated;
 grant execute on function public.review_customer_pack_payment(text, boolean) to authenticated;
 
 do $$
