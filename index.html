@@ -1267,6 +1267,9 @@ function authErrorText(err) {
   if (code === 'edge_function_unavailable') {
     return 'The account-management function is unavailable. Deploy the latest manage-account function in Supabase, then try again.';
   }
+  if (/unsupported account operation/i.test((err && err.message) || '')) {
+    return 'The deployed Supabase manage-account function is outdated and does not support permanent customer deletion. Deploy the latest function to the same Supabase project used by this app, then try again.';
+  }
   if (code === 'invalid_credentials' || code === 'user_not_found' || code === 'invalid-login-credentials') {
     const hint = state.authForm.role === 'owner' ? ' Customer? Use the Customer tab.' : ' Owner? Use the Owner tab.';
     return 'Wrong email or password.' + (state.session.status !== 'in' ? hint : '');
