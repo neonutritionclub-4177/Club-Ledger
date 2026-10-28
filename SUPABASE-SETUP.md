@@ -8,6 +8,10 @@ Edge Function. Firebase is not used. Vercel only hosts the static PWA.
 1. Create or open your Supabase project.
 2. In **SQL Editor**, run the complete contents of `supabase/schema.sql`.
    The script creates the tables, security policies, and owner-approval RPC.
+   For an existing installation, also run
+   `supabase/migrations/20261028000000_admin_club_reports_access.sql`. It
+   restores the authenticated table grants used by owner ledger sync and
+   permits platform admins to read (but not edit) club ledgers for reporting.
    It checks `pg_publication` directly and continues if the
    `supabase_realtime` publication is absent.
 3. In **Authentication → Providers**, enable **Email** and allow email/password
@@ -137,6 +141,17 @@ No Firebase setup or Firebase domain allowlisting is needed.
 
 ### If owner signup or admin login fails
 
+- **Owner dashboard says “permission denied for table club_ledgers,” or new
+  customer registrations do not appear in the owner approval list:** Run the
+  latest `supabase/schema.sql` or the
+  `20261028000000_admin_club_reports_access.sql` migration in Supabase SQL
+  Editor, then sign out and back in. The migration restores authenticated
+  ledger/registration table grants while keeping ledger access limited by
+  owner/admin row-level security policies.
+- **Admin reports cannot load:** Verify the administrator UUID is in
+  `public.platform_admins`, then apply the same migration. Admin report access
+  is read-only and covers all registered clubs; the club selector also allows
+  viewing one club at a time.
 - **Owner signup:** Confirm Email/password signups are enabled and the latest
   `supabase/schema.sql` has been run. The schema installs a trigger that saves
   the owner request automatically as part of Auth account creation; no manual
