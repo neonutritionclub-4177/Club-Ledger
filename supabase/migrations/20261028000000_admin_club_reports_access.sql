@@ -1,3 +1,4 @@
+grant usage on schema public to authenticated;
 grant select, insert, update on public.club_ledgers to authenticated;
 grant select, insert, update on public.customer_registrations to authenticated;
 
