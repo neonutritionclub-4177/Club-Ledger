@@ -118,10 +118,15 @@ begin
 end;
 $$;
 
+drop function if exists public.create_owner_pack_request(text, text, text);
+
 create or replace function public.create_owner_pack_request(
   request_id text,
   target_customer_id text,
-  target_pack_type text
+  target_pack_type text,
+  target_total_shakes integer default null,
+  target_duration_days integer default null,
+  target_amount numeric default null
 )
 returns jsonb
 language plpgsql
@@ -161,16 +166,32 @@ begin
     raise exception 'A linked customer login is required for in-app payment requests' using errcode = 'P0001';
   end if;
 
+  perform pg_advisory_xact_lock(hashtextextended(customer_uid, 0));
+  if exists (
+    select 1 from public.pack_payment_requests requests
+    where requests.customer_uid = customer_uid
+      and requests.status in ('pending', 'payment_submitted')
+  ) then
+    raise exception 'This customer already has an active pack payment request' using errcode = 'P0001';
+  end if;
+
   select * into settings_row
     from public.club_payment_settings
     where club_id = target_club_id;
-  pack_shakes := case target_pack_type
-    when '6-day' then 6 when '12-day' then 12 when '26-day' then 26 when 'custom' then 30 else 0 end;
-  pack_days := case target_pack_type
-    when '6-day' then 6 when '12-day' then 12 when '26-day' then 26 when 'custom' then 30 else 0 end;
-  pack_price := nullif(settings_row.pack_prices ->> target_pack_type, '')::numeric;
-  if pack_shakes <= 0 or pack_price is null or pack_price <= 0 or coalesce(settings_row.upi_id, '') = '' then
-    raise exception 'Set a UPI ID and a price for this pack in Settings first' using errcode = 'P0001';
+  if target_pack_type = 'custom' then
+    pack_shakes := coalesce(target_total_shakes, 0);
+    pack_days := coalesce(target_duration_days, 30);
+    pack_price := target_amount;
+  else
+    pack_shakes := case target_pack_type
+      when '6-day' then 6 when '12-day' then 12 when '26-day' then 26 else 0 end;
+    pack_days := pack_shakes;
+    pack_price := nullif(settings_row.pack_prices ->> target_pack_type, '')::numeric;
+  end if;
+  if pack_shakes <= 0 or pack_shakes > 10000 or pack_days <= 0 or pack_days > 3650 or
+      pack_price is null or pack_price <= 0 or pack_price > 10000000 or
+      coalesce(settings_row.upi_id, '') = '' then
+    raise exception 'Choose a valid priced pack and configure a UPI ID in Settings' using errcode = 'P0001';
   end if;
 
   insert into public.pack_payment_requests (
@@ -184,70 +205,7 @@ begin
 end;
 $$;
 
-create or replace function public.create_customer_pack_request(
-  request_id text,
-  target_pack_type text
-)
-returns jsonb
-language plpgsql
-security definer
-set search_path = ''
-as $$
-declare
-  registration public.customer_registrations%rowtype;
-  settings_row public.club_payment_settings%rowtype;
-  pack_shakes integer;
-  pack_days integer;
-  pack_price numeric(12,2);
-  offer_row public.pack_payment_requests%rowtype;
-  now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint;
-begin
-  select * into registration
-    from public.customer_registrations
-    where user_uid = auth.uid()::text and status = 'linked'
-    limit 1;
-  if not found or registration.linked_customer_id is null then
-    raise exception 'A linked customer account is required' using errcode = '42501';
-  end if;
-
-  select * into settings_row
-    from public.club_payment_settings
-    where club_id = registration.club_id;
-  pack_shakes := case target_pack_type
-    when '6-day' then 6 when '12-day' then 12 when '26-day' then 26 when 'custom' then 30 else 0 end;
-  pack_days := case target_pack_type
-    when '6-day' then 6 when '12-day' then 12 when '26-day' then 26 when 'custom' then 30 else 0 end;
-  pack_price := nullif(settings_row.pack_prices ->> target_pack_type, '')::numeric;
-  if pack_shakes <= 0 or pack_price is null or pack_price <= 0 or coalesce(settings_row.upi_id, '') = '' then
-    raise exception 'This pack is not available for payment yet' using errcode = 'P0001';
-  end if;
-
-  select * into offer_row
-    from public.pack_payment_requests
-    where customer_uid = auth.uid()::text and status = 'offered'
-    order by created_at desc
-    limit 1
-    for update;
-  if found then
-    update public.pack_payment_requests
-      set pack_type = target_pack_type, total_shakes = pack_shakes,
-          duration_days = pack_days, amount = pack_price,
-          upi_id = settings_row.upi_id, status = 'pending', updated_at = now_ms
-      where id = offer_row.id;
-    return jsonb_build_object('id', offer_row.id, 'status', 'pending', 'amount', pack_price);
-  end if;
-
-  insert into public.pack_payment_requests (
-    id, club_id, customer_uid, customer_id, pack_type, total_shakes,
-    duration_days, amount, upi_id, status, created_at, updated_at
-  ) values (
-    request_id, registration.club_id, auth.uid()::text, registration.linked_customer_id,
-    target_pack_type, pack_shakes, pack_days, pack_price, settings_row.upi_id,
-    'pending', now_ms, now_ms
-  );
-  return jsonb_build_object('id', request_id, 'status', 'pending', 'amount', pack_price);
-end;
-$$;
+drop function if exists public.create_customer_pack_request(text, text);
 
 create or replace function public.submit_customer_pack_payment(
   request_id text,
@@ -308,6 +266,11 @@ declare
   ledger_value jsonb;
   customer_value jsonb;
   pack_value jsonb;
+  current_pack jsonb;
+  updated_pack jsonb;
+  packs_value jsonb;
+  pack_count integer;
+  current_expiry date;
   payment_value jsonb;
   start_date text := to_char(current_timestamp at time zone 'Asia/Kolkata', 'YYYY-MM-DD');
   now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint;
@@ -349,18 +312,46 @@ begin
     raise exception 'Customer record is no longer available' using errcode = 'P0002';
   end if;
 
-  pack_value := jsonb_build_object(
-    'id', request_id || '-pack',
-    'packType', request_row.pack_type,
-    'totalShakes', request_row.total_shakes,
-    'usedOffset', 0,
-    'cost', request_row.amount,
-    'startDate', start_date,
-    'expiryDate', to_char(start_date::date + request_row.duration_days, 'YYYY-MM-DD'),
-    'createdAt', now_ms,
-    'updatedAt', now_ms,
-    'deleted', false
-  );
+  packs_value := case
+    when jsonb_typeof(customer_value -> 'packs') = 'array' then customer_value -> 'packs'
+    else '[]'::jsonb
+  end;
+  pack_count := jsonb_array_length(packs_value);
+  if pack_count > 0 then
+    current_pack := packs_value -> (pack_count - 1);
+    current_expiry := greatest(
+      coalesce(nullif(current_pack ->> 'expiryDate', '')::date, start_date::date),
+      start_date::date
+    );
+    updated_pack := jsonb_set(
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(current_pack, '{totalShakes}',
+            to_jsonb(coalesce(nullif(current_pack ->> 'totalShakes', '')::integer, 0) + request_row.total_shakes), true),
+          '{cost}',
+          to_jsonb(coalesce(nullif(current_pack ->> 'cost', '')::numeric, 0) + request_row.amount), true
+        ),
+        '{expiryDate}',
+        to_jsonb(to_char(current_expiry + request_row.duration_days, 'YYYY-MM-DD')), true
+      ),
+      '{updatedAt}', to_jsonb(now_ms), true
+    );
+    packs_value := jsonb_set(packs_value, array[(pack_count - 1)::text], updated_pack, false);
+  else
+    pack_value := jsonb_build_object(
+      'id', request_id || '-pack',
+      'packType', request_row.pack_type,
+      'totalShakes', request_row.total_shakes,
+      'usedOffset', 0,
+      'cost', request_row.amount,
+      'startDate', start_date,
+      'expiryDate', to_char(start_date::date + request_row.duration_days, 'YYYY-MM-DD'),
+      'createdAt', now_ms,
+      'updatedAt', now_ms,
+      'deleted', false
+    );
+    packs_value := packs_value || jsonb_build_array(pack_value);
+  end if;
   payment_value := jsonb_build_object(
     'id', request_id || '-payment',
     'amount', request_row.amount,
@@ -382,8 +373,7 @@ begin
               jsonb_set(
                 jsonb_set(
                   jsonb_set(
-                    jsonb_set(entry, '{packs}',
-                      coalesce(entry -> 'packs', '[]'::jsonb) || jsonb_build_array(pack_value), true),
+                    jsonb_set(entry, '{packs}', packs_value, true),
                     '{payments}',
                     coalesce(entry -> 'payments', '[]'::jsonb) || jsonb_build_array(payment_value), true
                   ),
@@ -410,14 +400,11 @@ end;
 $$;
 
 revoke all on function public.create_owner_pack_offer(text, text, text) from public, anon, authenticated;
-revoke all on function public.create_owner_pack_request(text, text, text) from public, anon, authenticated;
-revoke all on function public.create_customer_pack_request(text, text) from public, anon, authenticated;
+revoke all on function public.create_owner_pack_request(text, text, text, integer, integer, numeric) from public, anon, authenticated;
 revoke all on function public.submit_customer_pack_payment(text, text) from public, anon, authenticated;
 revoke all on function public.decline_customer_pack_request(text) from public, anon, authenticated;
 revoke all on function public.review_customer_pack_payment(text, boolean) from public, anon, authenticated;
-grant execute on function public.create_owner_pack_offer(text, text, text) to authenticated;
-grant execute on function public.create_owner_pack_request(text, text, text) to authenticated;
-grant execute on function public.create_customer_pack_request(text, text) to authenticated;
+grant execute on function public.create_owner_pack_request(text, text, text, integer, integer, numeric) to authenticated;
 grant execute on function public.submit_customer_pack_payment(text, text) to authenticated;
 grant execute on function public.decline_customer_pack_request(text) to authenticated;
 grant execute on function public.review_customer_pack_payment(text, boolean) to authenticated;
