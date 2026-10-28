@@ -47,8 +47,8 @@ function createApp() {
     globalThis.testApi = {
       state, orderTotal, orderBalance, balanceOf, attendanceCount, shakesRemaining,
       doAdjustAttendance, doDeletePayment, activeCustomers, mergeRecords, migrateCustomer,
-      migrateBackupCustomer, portalFor, saveData, doSaveApprovalPack, renderLogin, currentClubName, renderAdminPage,
-      applyAdminClubFilter, renderCustomers, renderDashboard, handleAction,
+      migrateBackupCustomer, portalFor, saveData, doSaveApprovalPack, renderLogin, currentClubName, renderAdminPage, renderAdminReports,
+      applyAdminClubFilter, renderCustomers, renderDashboard, renderAdminClubs, handleAction,
       renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP
     };
   `, context);
@@ -192,7 +192,7 @@ test('new owner signup displays the requested administrator WhatsApp approval di
   assert.match(html, /Contact admin on WhatsApp/);
 });
 
-test('admin route renders a sign-in screen and an owner approval queue', () => {
+test('admin route renders sign-in and keeps owner approvals in Clubs', () => {
   const { api } = createApp();
   const loginHtml = api.renderAdminPage();
   assert.match(loginHtml, /Admin login/);
@@ -204,8 +204,11 @@ test('admin route renders a sign-in screen and an owner approval queue', () => {
     mobile: '+919876543210', email: 'owner@example.com', status: 'pending',
     createdAt: Date.now(), archived: false
   }];
+  const dashboard = api.renderAdminPage();
+  assert.doesNotMatch(dashboard, /Pending owner requests/);
+  api.state.adminTab = 'clubs';
   const html = api.renderAdminPage();
-  assert.match(html, /Pending owner requests \(1\)/);
+  assert.match(html, /Pending owner approvals \(1\)/);
   assert.match(html, /Nutrition Club One/);
   assert.match(html, /owner@example\.com/);
   assert.match(html, /data-action="approveOwner"/);
@@ -252,8 +255,7 @@ test('admin reports aggregate clubs and identify the club for daily and monthly 
   ];
   api.applyAdminClubFilter();
   api.state.adminTab = 'reports';
-  api.state.reportView = 'monthly';
-  api.state.reportMonth = '2026-10';
+  api.state.adminReportPeriod = 'monthly';
   const html = api.renderAdminPage();
   assert.match(html, /All registered clubs/);
   assert.match(html, /Nutrition Club A · A Customer/);
@@ -283,6 +285,7 @@ test('all admin navigation buttons open their matching screens', () => {
   api.applyAdminClubFilter();
 
   for (const [tab, heading] of [
+    ['clubs', 'Registered clubs'],
     ['customers', 'Customers across registered clubs'],
     ['orders', 'Orders across registered clubs'],
     ['attendance', 'Last 7 days · daily visits'],
@@ -292,6 +295,83 @@ test('all admin navigation buttons open their matching screens', () => {
     assert.equal(api.state.adminTab, tab);
     assert.match(api.renderAdminPage(), new RegExp(heading));
   }
+});
+
+test('admin dashboard metrics navigate to the correct workspace tabs', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  for (const [metric, tab] of [
+    ['Registered clubs', 'clubs'],
+    ['Customers', 'customers'],
+    ["Today's visits", 'attendance'],
+    ['Total collected', 'reports'],
+    ['Collected today', 'reports'],
+    ['Total balance due', 'reports']
+  ]) {
+    api.handleAction('goAdminTab', { dataset: { value: tab } });
+    assert.equal(api.state.adminTab, tab, metric);
+  }
+});
+
+test('admin has club-wise numeric charts and selected-club daily weekly monthly reports', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  const today = new Date();
+  const todayText = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+  api.state.adminClubs = [
+    {
+      id: 'club-chart-a', name: 'Chart Club Alpha', approved: true,
+      ledger: { customers: [{ id: 'customer-a', name: 'A', visits: [todayText], payments: [{ id: 'payment-a', date: todayText, amount: 350 }], packs: [] }], orders: [] }
+    },
+    {
+      id: 'club-chart-b', name: 'Chart Club Beta', approved: true,
+      ledger: { customers: [], orders: [{ id: 'order-b', customerName: 'B', date: todayText, items: [], payments: [{ id: 'payment-b', date: todayText, amount: 150 }] }] }
+    }
+  ];
+  api.applyAdminClubFilter();
+  api.state.adminTab = 'reports';
+  let html = api.renderAdminPage();
+  assert.match(html, /Chart Club Alpha/);
+  assert.match(html, /Chart Club Beta/);
+  assert.match(html, /admin-chart-value/);
+  assert.match(html, /Daily/);
+  assert.match(html, /Weekly/);
+  assert.match(html, /Monthly/);
+
+  api.state.adminForm.clubFilter = 'club-chart-a';
+  api.applyAdminClubFilter();
+  api.state.adminReportPeriod = 'monthly';
+  const selectedReport = api.renderAdminReports();
+  assert.match(selectedReport, /Chart Club Alpha · monthly collections/);
+  assert.doesNotMatch(selectedReport, /Chart Club Beta/);
+});
+
+test('admin Clubs page owns owner-approval controls and dashboard no longer shows the queue', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  api.state.adminClubs = [{ id: 'club-owner', name: 'Owner Club', approved: false, ledger: {} }];
+  api.state.adminRequests = [{
+    uid: 'owner-pending', ownerName: 'Pending Owner', clubName: 'Owner Club',
+    mobile: '1234567890', email: 'owner@example.com', status: 'pending', createdAt: Date.now()
+  }];
+  const dashboard = api.renderAdminPage();
+  assert.doesNotMatch(dashboard, /Pending owner approvals/);
+  api.state.adminTab = 'clubs';
+  const clubs = api.renderAdminPage();
+  assert.match(clubs, /Registered clubs/);
+  assert.match(clubs, /Pending owner approvals/);
+  assert.match(clubs, /Pending Owner/);
+  assert.match(clubs, /data-action="approveOwner"/);
+});
+
+test('admin theme toggle control is available and report labels have dark-mode contrast rules', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  const html = api.renderAdminPage();
+  assert.match(html, /Toggle admin light or dark mode/);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(source, /html\[data-theme="dark"\] \.report-row \.name/);
+  assert.match(source, /html\[data-theme="dark"\] \.admin-club-name/);
 });
 
 test('deleted customers are accessible from Customers and offer restore or permanent delete', () => {
@@ -381,6 +461,7 @@ test('admin history can show archived rows and the owner edit form', () => {
   const { api } = createApp();
   api.state.adminAuthenticated = true;
   api.state.adminShowArchived = true;
+  api.state.adminTab = 'clubs';
   api.state.adminRequests = [{
     uid: 'owner-2', ownerName: 'Owner Two', clubName: 'Club Two',
     mobile: '+919876543211', email: 'owner2@example.com', status: 'revoked',
@@ -504,6 +585,11 @@ test('Supabase schema restricts ledger access to club owners', () => {
   assert.match(migration, /grant select, insert, update on public\.customer_registrations to authenticated/);
   assert.match(migration, /create policy "Customers and club owners can read registrations"/);
   assert.match(migration, /create policy "Platform admins can read all club ledgers"/);
+  const combinedMigrations = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'combined-migrations.sql'), 'utf8');
+  assert.match(combinedMigrations, /grant usage on schema public to authenticated/);
+  assert.match(combinedMigrations, /create policy "Platform admins can read all club ledgers"/);
+  assert.match(combinedMigrations, /create or replace function public\.permanently_delete_customer/);
+  assert.match(combinedMigrations, /grant execute on function public\.permanently_delete_customer/);
   const deletionMigration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261028000001_permanent_customer_deletion.sql'), 'utf8');
   assert.match(deletionMigration, /Move the customer to Deleted before permanent removal/);
   assert.match(deletionMigration, /to service_role/);
