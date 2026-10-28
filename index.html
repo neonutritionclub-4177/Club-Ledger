@@ -472,6 +472,16 @@ function statusOf(c) {
 }
 function activeCustomers() { return state.customers.filter(c => !c.deleted); }
 function activeOrders() { return (state.orders || []).filter(o => !o.deleted); }
+function reportCustomerLabel(customer) {
+  return state.adminAuthenticated && customer.adminClubName
+    ? customer.adminClubName + ' · ' + customer.name
+    : customer.name;
+}
+function reportOrderCustomerLabel(order) {
+  return state.adminAuthenticated && order.adminClubName
+    ? order.adminClubName + ' · ' + order.customerName
+    : order.customerName;
+}
 function packExpiry(pack) {
   return pack.expiryDate || addDays(pack.startDate || todayStr(), 30);
 }
@@ -550,7 +560,11 @@ let state = {
   authForm: { role: loadLastRole(), mode: 'login', username: '', email: '', password: '', password2: '', ownerName: '', clubName: '', mobile: '', clubId: '', show: false, busy: false, error: '', info: '' },
   adminAuthenticated: false,
   adminRequests: [],
-  adminForm: { email: 'neonutritionclub@gmail.com', password: '', busy: false, error: '', monthFilter: '' },
+  adminClubs: [],
+  adminDataLoading: false,
+  adminDataError: '',
+  adminTab: 'dashboard',
+  adminForm: { email: 'neonutritionclub@gmail.com', password: '', busy: false, error: '', monthFilter: '', clubFilter: 'all' },
   adminShowArchived: false,
   ownerApprovalNotice: false,
   clubDirectory: [],
@@ -1156,6 +1170,64 @@ function mapOwnerRequest(entry) {
   };
 }
 
+function applyAdminClubFilter() {
+  const selectedClubId = state.adminForm.clubFilter || 'all';
+  const clubs = selectedClubId === 'all'
+    ? state.adminClubs
+    : state.adminClubs.filter(function (club) { return club.id === selectedClubId; });
+  state.customers = [];
+  state.orders = [];
+  clubs.forEach(function (club) {
+    const ledger = club.ledger || {};
+    (Array.isArray(ledger.customers) ? ledger.customers : []).forEach(function (record) {
+      state.customers.push(Object.assign(migrateCustomer(JSON.parse(JSON.stringify(record))), {
+        adminClubId: club.id,
+        adminClubName: club.name
+      }));
+    });
+    (Array.isArray(ledger.orders) ? ledger.orders : []).forEach(function (record) {
+      state.orders.push(Object.assign(migrateOrder(JSON.parse(JSON.stringify(record))), {
+        adminClubId: club.id,
+        adminClubName: club.name
+      }));
+    });
+  });
+}
+
+function loadAdminWorkspace() {
+  if (!state.adminAuthenticated || !supabaseClient || state.adminDataLoading) return;
+  state.adminDataLoading = true;
+  state.adminDataError = '';
+  render();
+  Promise.all([
+    supabaseClient.from('clubs').select('id,name,approved').order('name'),
+    supabaseClient.from('club_ledgers').select('club_id,ledger')
+  ]).then(function (results) {
+    if (!state.adminAuthenticated) return;
+    results.forEach(function (result) {
+      if (result.error) throw result.error;
+    });
+    const ledgersByClub = new Map((results[1].data || []).map(function (row) {
+      return [row.club_id, row.ledger || {}];
+    }));
+    state.adminClubs = (results[0].data || []).map(function (club) {
+      return Object.assign({}, club, { ledger: ledgersByClub.get(club.id) || null });
+    });
+    if (state.adminForm.clubFilter !== 'all' &&
+        !state.adminClubs.some(function (club) { return club.id === state.adminForm.clubFilter; })) {
+      state.adminForm.clubFilter = 'all';
+    }
+    applyAdminClubFilter();
+    state.adminDataLoading = false;
+    render();
+  }).catch(function (err) {
+    if (!state.adminAuthenticated) return;
+    state.adminDataLoading = false;
+    state.adminDataError = authErrorText(err);
+    render();
+  });
+}
+
 function setSessionOut() {
   stopOwnerSync();
   stopPortalSync();
@@ -1242,8 +1314,12 @@ function handleAuthState(user) {
             state.adminForm.password = '';
             state.adminForm.error = '';
             state.adminRequests = (result.data || []).map(mapOwnerRequest);
+            state.adminClubs = [];
+            state.customers = [];
+            state.orders = [];
             state.session = { status: 'in', role: 'platformAdmin', uid: user.id, username: user.email || '' };
             render();
+            loadAdminWorkspace();
           });
       }).catch(function (err) {
         state.adminForm.busy = false;
@@ -1953,6 +2029,111 @@ function renderAdminRequestGroups(entries) {
   }).join('');
 }
 
+function renderAdminCustomers() {
+  const customers = activeCustomers();
+  return `<div class="card">
+    <h3 class="section-title">Customers across registered clubs (${customers.length})</h3>
+    ${customers.length ? customers.map(function (customer) {
+      return `<div class="report-row">
+        <div><p class="name">${escapeHtml(reportCustomerLabel(customer))}</p><p class="meta">${escapeHtml(customer.phone || 'No mobile')} · ${customer.visits.length} visits</p></div>
+        <p class="amt">${formatCurrency(Math.max(0, balanceOf(customer)))} due</p>
+      </div>`;
+    }).join('') : '<p class="empty-state-text">No customers in this club selection.</p>'}
+  </div>`;
+}
+
+function renderAdminOrders() {
+  const orders = activeOrders();
+  return `<div class="card">
+    <h3 class="section-title">Orders across registered clubs (${orders.length})</h3>
+    ${orders.length ? orders.map(function (order) {
+      return `<div class="report-row">
+        <div><p class="name">${escapeHtml(reportOrderCustomerLabel(order))}</p><p class="meta">${escapeHtml(order.date)} · ${order.items.filter(item => !item.deleted).length} items</p></div>
+        <p class="amt">${formatCurrency(Math.max(0, orderBalance(order)))} due</p>
+      </div>`;
+    }).join('') : '<p class="empty-state-text">No orders in this club selection.</p>'}
+  </div>`;
+}
+
+function renderAdminAttendance() {
+  const date = state.attendanceDate;
+  const customers = activeCustomers();
+  const visitors = customers.filter(function (customer) { return attendanceCount(customer, date) > 0; });
+  const shakes = visitors.reduce((sum, customer) => sum + attendanceCount(customer, date), 0);
+  const days = Array.from({ length: 7 }, (_, index) => addDays(todayStr(), index - 6));
+  const bars = days.map(function (day) {
+    return `<div class="report-row"><p class="name">${formatDateShort(day)}</p><p class="amt">${customers.reduce((sum, customer) => sum + attendanceCount(customer, day), 0)} visits</p></div>`;
+  }).join('');
+  return `
+    <div class="card">
+      <div class="date-nav">
+        <button data-action="navDate" data-delta="-1">${ICONS.arrowLeft}</button>
+        <div class="date-label"><p class="big">${date === todayStr() ? 'Today' : formatDateShort(date)}</p><p class="small">${formatDateLong(date)}</p></div>
+        <button data-action="navDate" data-delta="1" ${date >= todayStr() ? 'disabled' : ''}>${ICONS.arrowRight}</button>
+      </div>
+      <p class="attendance-count"><span class="num">${visitors.length}</span><span class="label">${shakes} shakes served · ${customers.length} customers</span></p>
+    </div>
+    <div class="card"><h3 class="section-title">Last 7 days · daily visits</h3>${bars}</div>
+    <div class="card">
+      <h3 class="section-title">Attendance · ${formatDateShort(date)}</h3>
+      ${visitors.length ? visitors.map(function (customer) {
+        return `<div class="report-row"><p class="name">${escapeHtml(reportCustomerLabel(customer))}</p><p class="amt">${attendanceCount(customer, date)} shakes</p></div>`;
+      }).join('') : '<p class="empty-state-text">No attendance recorded on this day.</p>'}
+    </div>
+  `;
+}
+
+function renderAdminDataTab() {
+  if (state.adminTab === 'customers') return renderAdminCustomers();
+  if (state.adminTab === 'orders') return renderAdminOrders();
+  if (state.adminTab === 'attendance') return renderAdminAttendance();
+  return renderReports();
+}
+
+function renderAdminOverview() {
+  const totals = computeTotals();
+  const orders = activeOrders();
+  const orderCollected = orders.reduce((sum, order) => sum + orderPaid(order), 0);
+  const orderDue = orders.reduce((sum, order) => sum + Math.max(0, orderBalance(order)), 0);
+  const visibleClubs = state.adminForm.clubFilter === 'all'
+    ? state.adminClubs
+    : state.adminClubs.filter(function (club) { return club.id === state.adminForm.clubFilter; });
+  const today = todayStr();
+  const clubRows = visibleClubs.map(function (club) {
+    const ledger = club.ledger || {};
+    const customers = (Array.isArray(ledger.customers) ? ledger.customers : [])
+      .map(function (customer) { return migrateCustomer(JSON.parse(JSON.stringify(customer))); })
+      .filter(function (customer) { return !customer.deleted; });
+    const clubOrders = (Array.isArray(ledger.orders) ? ledger.orders : [])
+      .map(function (order) { return migrateOrder(JSON.parse(JSON.stringify(order))); })
+      .filter(function (order) { return !order.deleted; });
+    const collected = customers.reduce((sum, customer) => sum + lifetimePaid(customer), 0) +
+      clubOrders.reduce((sum, order) => sum + orderPaid(order), 0);
+    const visits = customers.filter(function (customer) { return (customer.visits || []).includes(today); }).length;
+    return `<div class="report-row">
+      <div><p class="name">${escapeHtml(club.name)}</p><p class="meta">${customers.length} customers · ${visits} visits today · ${club.approved ? 'Approved' : 'Not active'}</p></div>
+      <p class="amt">${formatCurrency(collected)}</p>
+    </div>`;
+  });
+  const selectedClubName = state.adminForm.clubFilter === 'all'
+    ? 'All registered clubs'
+    : ((state.adminClubs.find(function (club) { return club.id === state.adminForm.clubFilter; }) || {}).name || 'Selected club');
+  return `
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-icon blue">${ICONS.users}</div><div class="stat-value">${state.adminClubs.length}</div><div class="stat-label">Registered clubs</div></div>
+      <div class="stat-card"><div class="stat-icon blue">${ICONS.users}</div><div class="stat-value">${totals.totalCustomers}</div><div class="stat-label">Customers · ${escapeHtml(selectedClubName)}</div></div>
+      <div class="stat-card"><div class="stat-icon blue">${ICONS.calendar}</div><div class="stat-value">${totals.todayVisits}</div><div class="stat-label">Today's visits</div></div>
+      <div class="stat-card"><div class="stat-icon green">${ICONS.wallet}</div><div class="stat-value">${formatCurrency(totals.totalCollected + orderCollected)}</div><div class="stat-label">Total collected · packs and orders</div></div>
+      <div class="stat-card"><div class="stat-icon green">${ICONS.wallet}</div><div class="stat-value">${formatCurrency(totals.todayCollected)}</div><div class="stat-label">Collected today</div></div>
+      <div class="stat-card"><div class="stat-icon red">${ICONS.trending}</div><div class="stat-value">${formatCurrency(totals.totalOutstanding + orderDue)}</div><div class="stat-label">Total balance due</div></div>
+    </div>
+    <div class="card">
+      <h3 class="section-title">Club collections · ${escapeHtml(selectedClubName)}</h3>
+      ${clubRows.length ? clubRows.join('') : '<p class="empty-state-text">No registered clubs found.</p>'}
+    </div>
+  `;
+}
+
 function renderAdminPage() {
   const form = state.adminForm;
   if (!state.adminAuthenticated) {
@@ -1981,31 +2162,57 @@ function renderAdminPage() {
   return `
     <div class="app">
       <header class="header">
-        <div><h1>Platform Admin</h1><p class="date">Owner approval queue</p></div>
+        <div><h1>Platform Admin</h1><p class="date">${state.adminTab === 'reports' ? 'Club reports' : 'Dashboard and owner approvals'}</p></div>
         <button class="btn-primary-sm" data-action="adminLogout">Log out</button>
       </header>
       <main class="main">
         ${form.error ? `<div class="auth-error" role="alert">${escapeHtml(form.error)}</div>` : ''}
+        ${state.adminDataError ? `<div class="auth-error" role="alert">Unable to load club reports: ${escapeHtml(state.adminDataError)}. Apply the latest Supabase schema and access migration, then refresh.</div>` : ''}
         <div class="card">
-          <h3 class="section-title">Owner approval history</h3>
-          <div class="field"><label for="admin-month-filter">Filter by month</label>
-            <input id="admin-month-filter" type="month" data-bind="adminForm.monthFilter" value="${escapeHtml(monthFilter)}">
+          <div class="field"><label for="admin-club-filter">Reports for</label>
+            <select id="admin-club-filter" data-bind="adminForm.clubFilter">
+              <option value="all" ${state.adminForm.clubFilter === 'all' ? 'selected' : ''}>All registered clubs</option>
+              ${state.adminClubs.map(function (club) {
+                return `<option value="${escapeHtml(club.id)}" ${state.adminForm.clubFilter === club.id ? 'selected' : ''}>${escapeHtml(club.name)}</option>`;
+              }).join('')}
+            </select>
           </div>
-          <button class="link-btn" data-action="toggleArchivedOwnerRequests">${state.adminShowArchived ? 'Show active requests and history' : 'Show archived history'}</button>
-          <button class="link-btn" data-action="refreshOwnerRequests" ${form.refreshing ? 'disabled' : ''}>${form.refreshing ? 'Refreshing…' : 'Refresh requests'}</button>
+          <button class="link-btn" data-action="refreshAdminWorkspace" ${state.adminDataLoading ? 'disabled' : ''}>${state.adminDataLoading ? 'Refreshing club data…' : 'Refresh club data'}</button>
         </div>
-        <div class="card">
-          <h3 class="section-title">${state.adminShowArchived ? 'Archived owner requests' : 'Pending owner requests'} (${state.adminShowArchived ? requests.length : pending.length})</h3>
-          ${state.adminShowArchived
-            ? (requests.length ? renderAdminRequestGroups(requests) : '<p class="empty-state-text">No archived owner requests.</p>')
-            : (pending.length ? renderAdminRequestGroups(pending) : '<p class="empty-state-text">No owner requests are waiting for approval.</p>')}
-        </div>
-        ${!state.adminShowArchived ? `<div class="card">
-          <h3 class="section-title">Past approvals &amp; requests (${history.length})</h3>
-          ${history.length ? renderAdminRequestGroups(history) : '<p class="empty-state-text">No approval history for this month.</p>'}
-        </div>
-        ` : ''}
+        ${state.adminDataLoading ? '<div class="card"><p class="empty-state-text">Loading club reports…</p></div>' : ''}
+        ${state.adminTab !== 'dashboard' ? renderAdminDataTab() : `
+          ${renderAdminOverview()}
+          <div class="card">
+            <h3 class="section-title">Owner approval history</h3>
+            <div class="field"><label for="admin-month-filter">Filter by month</label>
+              <input id="admin-month-filter" type="month" data-bind="adminForm.monthFilter" value="${escapeHtml(monthFilter)}">
+            </div>
+            <button class="link-btn" data-action="toggleArchivedOwnerRequests">${state.adminShowArchived ? 'Show active requests and history' : 'Show archived history'}</button>
+            <button class="link-btn" data-action="refreshOwnerRequests" ${form.refreshing ? 'disabled' : ''}>${form.refreshing ? 'Refreshing…' : 'Refresh requests'}</button>
+          </div>
+          <div class="card">
+            <h3 class="section-title">${state.adminShowArchived ? 'Archived owner requests' : 'Pending owner requests'} (${state.adminShowArchived ? requests.length : pending.length})</h3>
+            ${state.adminShowArchived
+              ? (requests.length ? renderAdminRequestGroups(requests) : '<p class="empty-state-text">No archived owner requests.</p>')
+              : (pending.length ? renderAdminRequestGroups(pending) : '<p class="empty-state-text">No owner requests are waiting for approval.</p>')}
+          </div>
+          ${!state.adminShowArchived ? `<div class="card">
+            <h3 class="section-title">Past approvals &amp; requests (${history.length})</h3>
+            ${history.length ? renderAdminRequestGroups(history) : '<p class="empty-state-text">No approval history for this month.</p>'}
+          </div>` : ''}
+        `}
       </main>
+      <nav class="nav">
+        ${[
+          { id: 'dashboard', label: 'Dashboard', icon: ICONS.dashboard },
+          { id: 'customers', label: 'Customers', icon: ICONS.users },
+          { id: 'orders', label: 'Orders', icon: ICONS.bag },
+          { id: 'attendance', label: 'Attendance', icon: ICONS.calendar },
+          { id: 'reports', label: 'Reports', icon: ICONS.barChart }
+        ].map(function (tab) {
+          return `<button class="${state.adminTab === tab.id ? 'active' : ''}" data-action="setAdminTab" data-value="${tab.id}">${tab.icon}<span>${tab.label}</span></button>`;
+        }).join('')}
+      </nav>
     </div>
   `;
 }
@@ -2685,7 +2892,7 @@ function computeMonthlyStats(monthStr) {
     newPacks += packsStarted;
     if (visitsInMonth > 0) activeIds.add(c.id);
     if (visitsInMonth > 0 || paidInMonth > 0) {
-      perCustomer.push({ name: c.name, visits: visitsInMonth, paid: paidInMonth });
+      perCustomer.push({ name: reportCustomerLabel(c), visits: visitsInMonth, paid: paidInMonth });
     }
   });
   perCustomer.sort((a, b) => b.paid - a.paid || b.visits - a.visits);
@@ -2701,7 +2908,8 @@ function computeMonthlyOrderStats(monthStr) {
     revenue += paidInMonth;
     if ((o.date || '').startsWith(monthStr)) newOrders++;
     if (paidInMonth > 0) {
-      perCustomerMap[o.customerName] = (perCustomerMap[o.customerName] || 0) + paidInMonth;
+      const customerLabel = reportOrderCustomerLabel(o);
+      perCustomerMap[customerLabel] = (perCustomerMap[customerLabel] || 0) + paidInMonth;
     }
   });
   const perCustomer = Object.entries(perCustomerMap)
@@ -2727,11 +2935,11 @@ function deltaTag(d) { return d === null ? '' : `<span class="delta">${d >= 0 ? 
 function dayData(d) {
   const club = [], orders = [], packs = [];
   activeCustomers().forEach(c => {
-    (c.payments || []).filter(p => !p.deleted).forEach(p => { if (p.date === d) club.push({ name: c.name, amount: Number(p.amount) || 0, note: p.note || '', ts: p.ts || 0 }); });
-    (c.packs || []).forEach((pk, i) => { if (pk.startDate === d) packs.push({ name: c.name, shakes: pk.totalShakes, cost: Number(pk.cost) || 0, renewal: i > 0 }); });
+    (c.payments || []).filter(p => !p.deleted).forEach(p => { if (p.date === d) club.push({ name: reportCustomerLabel(c), amount: Number(p.amount) || 0, note: p.note || '', ts: p.ts || 0 }); });
+    (c.packs || []).forEach((pk, i) => { if (pk.startDate === d) packs.push({ name: reportCustomerLabel(c), shakes: pk.totalShakes, cost: Number(pk.cost) || 0, renewal: i > 0 }); });
   });
   activeOrders().forEach(o => (o.payments || []).filter(p => !p.deleted).forEach(p => {
-    if (p.date === d) orders.push({ name: o.customerName, amount: Number(p.amount) || 0, note: p.note || '', ts: p.ts || 0 });
+    if (p.date === d) orders.push({ name: reportOrderCustomerLabel(o), amount: Number(p.amount) || 0, note: p.note || '', ts: p.ts || 0 });
   }));
   const visits = activeCustomers().filter(c => (c.visits || []).includes(d)).length;
   const clubTotal = club.reduce((s, x) => s + x.amount, 0);
@@ -2938,7 +3146,7 @@ function renderCustomersReport() {
   const periods = [['month', 'This month'], ['90d', '90 days'], ['all', 'All time']];
 
   const perCust = activeCustomers().map(c => ({
-    name: c.name,
+    name: reportCustomerLabel(c),
     paid: (c.payments || []).filter(p => !p.deleted && inRange(p.date, r)).reduce((s, p) => s + Number(p.amount || 0), 0),
     visits: (c.visits || []).filter(d => inRange(d, r)).length
   }));
@@ -2949,7 +3157,10 @@ function renderCustomersReport() {
 
   const buyers = {};
   activeOrders().forEach(o => (o.payments || []).filter(p => !p.deleted).forEach(p => {
-    if (inRange(p.date, r)) buyers[o.customerName] = (buyers[o.customerName] || 0) + Number(p.amount || 0);
+    if (inRange(p.date, r)) {
+      const customerLabel = reportOrderCustomerLabel(o);
+      buyers[customerLabel] = (buyers[customerLabel] || 0) + Number(p.amount || 0);
+    }
   }));
   const topBuyers = Object.entries(buyers).sort((a, b) => b[1] - a[1]).slice(0, 5)
     .map(([name, amt]) => ({ name, value: amt, label: formatCurrency(amt) }));
@@ -2960,7 +3171,7 @@ function renderCustomersReport() {
   activeCustomers().forEach(c => (c.packs || []).forEach((pk, i) => {
     if (!inRange(pk.startDate, r)) return;
     if (i === 0) joins++;
-    else renewed.push({ name: c.name, date: pk.startDate, shakes: pk.totalShakes, cost: Number(pk.cost) || 0 });
+    else renewed.push({ name: reportCustomerLabel(c), date: pk.startDate, shakes: pk.totalShakes, cost: Number(pk.cost) || 0 });
   }));
   renewed.sort((a, b) => a.date < b.date ? 1 : -1);
   const renewedValue = renewed.reduce((s, x) => s + x.cost, 0);
@@ -2977,7 +3188,7 @@ function renderCustomersReport() {
         const idx = currentPackIndex(c);
         return `
         <div class="followup-item">
-          <div><p class="followup-name">${escapeHtml(c.name)}</p><p class="followup-due">${rem === 0 ? 'Pack finished' : rem + ' shake' + (rem === 1 ? '' : 's') + ' left'} · last pack ${formatCurrency(idx >= 0 ? c.packs[idx].cost : 0)}</p></div>
+          <div><p class="followup-name">${escapeHtml(reportCustomerLabel(c))}</p><p class="followup-due">${rem === 0 ? 'Pack finished' : rem + ' shake' + (rem === 1 ? '' : 's') + ' left'} · last pack ${formatCurrency(idx >= 0 ? c.packs[idx].cost : 0)}</p></div>
           <div class="row-actions">
             <button class="btn-remind ${sent ? 'done' : ''}" data-action="remind" data-type="shakes" data-id="${c.id}">${sent ? 'Reminded ✓' : 'Remind'}</button>
             <button class="btn-pay-mini" data-action="openRenew" data-id="${c.id}">Renew</button>
@@ -3477,6 +3688,7 @@ function handleAction(action, target) {
     case 'approveOwner': reviewOwnerRequest(id, 'approve'); break;
     case 'rejectOwner': reviewOwnerRequest(id, 'reject'); break;
     case 'refreshOwnerRequests': refreshAdminRequests(); break;
+    case 'refreshAdminWorkspace': loadAdminWorkspace(); break;
     case 'editOwnerRequest': openEditOwner(id); break;
     case 'archiveOwnerRequest': setOwnerRequestArchived(id, true); break;
     case 'restoreOwnerRequest': setOwnerRequestArchived(id, false); break;
@@ -3489,9 +3701,18 @@ function handleAction(action, target) {
     case 'adminLogout':
       state.adminAuthenticated = false;
       state.adminRequests = [];
+      state.adminClubs = [];
+      state.adminDataLoading = false;
+      state.adminDataError = '';
+      state.customers = [];
+      state.orders = [];
       state.adminForm.password = '';
       state.adminForm.error = '';
       supabaseClient.auth.signOut();
+      break;
+    case 'setAdminTab':
+      state.adminTab = target.dataset.value === 'reports' ? 'reports' : 'dashboard';
+      render();
       break;
     case 'setTab':
       state.tab = target.dataset.value;
@@ -4294,6 +4515,7 @@ document.body.addEventListener('change', function (e) {
   }
   if (e.target.dataset && e.target.dataset.bind) {
     setPath(state, e.target.dataset.bind, e.target.value);
+    if (e.target.dataset.bind === 'adminForm.clubFilter') applyAdminClubFilter();
     updateBoundFormControls();
     if (e.target.tagName === 'SELECT' || e.target.type === 'month') render();
   }
