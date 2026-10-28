@@ -47,8 +47,8 @@ function createApp() {
     globalThis.testApi = {
       state, orderTotal, orderBalance, balanceOf, attendanceCount, shakesRemaining,
       doAdjustAttendance, doDeletePayment, activeCustomers, mergeRecords, migrateCustomer,
-      migrateBackupCustomer, portalFor, saveData, renderLogin, currentClubName, renderAdminPage,
-      applyAdminClubFilter,
+      migrateBackupCustomer, portalFor, saveData, doSaveApprovalPack, renderLogin, currentClubName, renderAdminPage,
+      applyAdminClubFilter, renderCustomers, renderDashboard, handleAction,
       renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP
     };
   `, context);
@@ -263,6 +263,120 @@ test('admin reports aggregate clubs and identify the club for daily and monthly 
   assert.match(html, /Monthly/);
 });
 
+test('all admin navigation buttons open their matching screens', () => {
+  const { api, root } = createApp();
+  api.state.adminAuthenticated = true;
+  api.state.adminClubs = [{
+    id: 'club-nav', name: 'Navigation Club', approved: true,
+    ledger: {
+      customers: [{
+        id: 'customer-nav', name: 'Navigation Customer', phone: '1234567890',
+        joinDate: '2026-10-01', visits: [], packs: [], payments: []
+      }],
+      orders: [{
+        id: 'order-nav', customerName: 'Order Customer', date: '2026-10-01',
+        items: [{ id: 'item-nav', name: 'Shake', price: 100, quantity: 1 }],
+        payments: []
+      }]
+    }
+  }];
+  api.applyAdminClubFilter();
+
+  for (const [tab, heading] of [
+    ['customers', 'Customers across registered clubs'],
+    ['orders', 'Orders across registered clubs'],
+    ['attendance', 'Last 7 days · daily visits'],
+    ['reports', 'Daily']
+  ]) {
+    api.handleAction('setAdminTab', { dataset: { value: tab } });
+    assert.equal(api.state.adminTab, tab);
+    assert.match(api.renderAdminPage(), new RegExp(heading));
+  }
+});
+
+test('deleted customers are accessible from Customers and offer restore or permanent delete', () => {
+  const { api } = createApp();
+  api.state.filter = 'deleted';
+  api.state.customers = [{
+    id: 'deleted-customer', name: 'Deleted Customer', phone: '1234567890',
+    joinDate: '2026-10-01', createdAt: Date.now(), updatedAt: Date.now(),
+    deleted: true, packs: [], payments: [], visits: []
+  }];
+  const html = api.renderCustomers();
+  assert.match(html, /Deleted customers/);
+  assert.match(html, /Download backup|Open backup &amp; restore/);
+  assert.match(html, /data-action="restoreCustomer"/);
+  assert.match(html, /data-action="openPermanentDeleteCustomer"/);
+
+  api.state.modal = { type: 'permanentDeleteCustomer', id: 'deleted-customer' };
+  api.state.modalForm = { busy: false, error: '' };
+  const confirmHtml = api.renderModal();
+  assert.match(confirmHtml, /Permanently delete customer/);
+  assert.match(confirmHtml, /attendance, pack, and payment history/);
+});
+
+test('customer approval continues to a pack selection screen', () => {
+  const { api } = createApp();
+  api.state.customers = [{
+    id: 'approved-customer', name: 'Approved Customer', joinDate: '2026-10-01',
+    packs: [], payments: [], visits: []
+  }];
+  api.state.modal = { type: 'approvalPack', id: 'approved-customer' };
+  api.state.modalForm = {
+    packType: '', totalShakes: '', cost: '', startDate: '2026-10-28',
+    initialPayment: '', busy: false, error: ''
+  };
+  const html = api.renderModal();
+  assert.match(html, /Choose customer pack/);
+  assert.match(html, /Pack type \*/);
+  assert.match(html, /Pack cost \(₹\) \*/);
+  assert.match(html, /Save pack and finish approval/);
+});
+
+test('approval pack save retains stable IDs and does not duplicate pack or payment on retry', async () => {
+  const { api, context } = createApp();
+  context.CONFIG.packTypes = [{ id: 'custom', label: 'Custom', durationDays: 30 }];
+  const customer = {
+    id: 'approved-customer', name: 'Approved Customer', joinDate: '2026-10-01',
+    packs: [], payments: [], visits: []
+  };
+  api.state.customers = [customer];
+  api.state.modal = { type: 'approvalPack', id: customer.id };
+  api.state.modalForm = {
+    packType: 'custom', totalShakes: '30', cost: '3000',
+    startDate: '2026-10-28', initialPayment: '500',
+    packId: 'stable-pack', paymentId: 'stable-payment', busy: false, error: ''
+  };
+
+  api.doSaveApprovalPack();
+  await Promise.resolve();
+  api.doSaveApprovalPack();
+  await Promise.resolve();
+
+  assert.equal(customer.packs.length, 1);
+  assert.equal(customer.packs[0].id, 'stable-pack');
+  assert.equal(customer.payments.length, 1);
+  assert.equal(customer.payments[0].id, 'stable-payment');
+});
+
+test('pending customer registrations display their Supabase creation date', () => {
+  const { api } = createApp();
+  api.state.pendingRegistrations = [{
+    id: 'pending-1', name: 'New Customer', mobile: '1234567890',
+    createdAt: Date.now()
+  }];
+  const html = api.renderDashboard({
+    totalCollected: 0, totalOutstanding: 0, totalCustomers: 0, withLogin: 0,
+    todayVisits: 0, todayShakes: 0, todayCollected: 0,
+    balanceFollowUps: [], shakeFollowUps: [], expiringFollowUps: [], orderFollowUps: []
+  });
+  assert.match(html, /Customer registrations awaiting approval/);
+  assert.match(html, /data-action="openLinkRegistration"/);
+  assert.doesNotMatch(html, /Invalid Date/);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(source, /createdAt:\s*entry\.created_at/);
+});
+
 test('admin history can show archived rows and the owner edit form', () => {
   const { api } = createApp();
   api.state.adminAuthenticated = true;
@@ -363,6 +477,7 @@ test('Supabase schema scopes data and protects owner approvals', () => {
   assert.match(schema, /create or replace function public\.set_owner_request_archived/);
   assert.match(schema, /create or replace function public\.set_owner_access/);
   assert.match(schema, /create or replace function public\.admin_update_owner_details/);
+  assert.match(schema, /create or replace function public\.permanently_delete_customer/);
   assert.match(schema, /'revoked'/);
   assert.match(schema, /if not public\.is_platform_admin\(\)/);
   assert.match(schema, /public\.is_club_owner\(club_id\)/);
@@ -384,8 +499,14 @@ test('Supabase schema restricts ledger access to club owners', () => {
   assert.match(schema, /create policy "Customers and club owners can read portal cards"/);
   assert.match(schema, /grant select on public\.clubs to anon/);
   const migration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261028000000_admin_club_reports_access.sql'), 'utf8');
+  assert.match(migration, /grant usage on schema public to authenticated/);
   assert.match(migration, /grant select, insert, update on public\.club_ledgers to authenticated/);
+  assert.match(migration, /grant select, insert, update on public\.customer_registrations to authenticated/);
+  assert.match(migration, /create policy "Customers and club owners can read registrations"/);
   assert.match(migration, /create policy "Platform admins can read all club ledgers"/);
+  const deletionMigration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261028000001_permanent_customer_deletion.sql'), 'utf8');
+  assert.match(deletionMigration, /Move the customer to Deleted before permanent removal/);
+  assert.match(deletionMigration, /to service_role/);
 });
 
 test('Vercel static deployment disables stale service worker caching', () => {
@@ -435,6 +556,8 @@ test('Vercel static deployment disables stale service worker caching', () => {
   assert.match(functionSource, /auth\.admin\.createUser/);
   assert.match(functionSource, /auth\.admin\.updateUserById/);
   assert.match(functionSource, /action === "admin-owner-edit"/);
+  assert.match(functionSource, /action === "customer-delete-permanently"/);
+  assert.match(functionSource, /permanently_delete_customer/);
   assert.match(functionSource, /from\("platform_admins"\)/);
   assert.match(functionSource, /const email = cleanEmail\(body\.email\)/);
   assert.match(functionSource, /email,/);
