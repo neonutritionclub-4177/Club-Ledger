@@ -48,8 +48,9 @@ function createApp() {
       state, orderTotal, orderBalance, balanceOf, attendanceCount, shakesRemaining,
       doAdjustAttendance, doDeletePayment, activeCustomers, mergeRecords, migrateCustomer,
       migrateBackupCustomer, portalFor, saveData, doSaveApprovalPack, renderLogin, currentClubName, renderAdminPage, renderAdminReports,
-      applyAdminClubFilter, renderCustomers, renderDashboard, renderAdminClubs, handleAction,
-      renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP
+      applyAdminClubFilter, renderCustomers, renderDashboard, renderAdminClubs, valueBars, adminReportRanges, handleAction,
+      renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP,
+      buildAdminReportData, renderAdminReportDocument, adminReportPrintHtml
     };
   `, context);
   return { api: context.testApi, context, root, listeners };
@@ -372,6 +373,86 @@ test('admin theme toggle control is available and report labels have dark-mode c
   const source = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   assert.match(source, /html\[data-theme="dark"\] \.report-row \.name/);
   assert.match(source, /html\[data-theme="dark"\] \.admin-club-name/);
+});
+
+test('all report charts show complete dates below their matching bars', () => {
+  const { api } = createApp();
+  const bars = api.valueBars(['Oct 15', 'Oct 16'], [20, 35], 1);
+  assert.match(bars, /vbar-track[\s\S]*vbar-day">Oct 15/);
+  assert.match(bars, /vbar-track[\s\S]*vbar-day">Oct 16/);
+  const dailyLabels = api.adminReportRanges('daily').map(range => range.label);
+  const weeklyLabels = api.adminReportRanges('weekly').map(range => range.label);
+  const monthlyLabels = api.adminReportRanges('monthly').map(range => range.label);
+  assert.match(dailyLabels[0], /[A-Za-z]{3}/);
+  assert.match(weeklyLabels[0], /–/);
+  assert.match(monthlyLabels[0], /20\d{2}/);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.doesNotMatch(source.match(/\.admin-chart-name \{[^}]+\}/)[0], /transform:\s*rotate/);
+});
+
+test('admin report export includes custom-range club, daily, weekly, and monthly charts', () => {
+  const { api, context } = createApp();
+  api.state.adminForm = { clubFilter: 'all' };
+  api.state.adminClubs = [
+    {
+      id: 'report-a', name: 'Report Club A', approved: true,
+      ledger: {
+        customers: [{
+          id: 'report-customer', name: 'Report Customer', visits: ['2026-10-28'],
+          attendanceCounts: { '2026-10-28': 2 }, packs: [],
+          payments: [{ id: 'report-payment', date: '2026-10-28', amount: 350 }]
+        }],
+        orders: []
+      }
+    },
+    {
+      id: 'report-b', name: 'Report Club B', approved: true,
+      ledger: {
+        customers: [],
+        orders: [{
+          id: 'report-order', customerName: 'Order Customer', date: '2026-10-29',
+          items: [], payments: [{ id: 'report-order-payment', date: '2026-10-29', amount: 150 }]
+        }]
+      }
+    }
+  ];
+
+  const data = api.buildAdminReportData('2026-10-28', '2026-10-29', 'all');
+  assert.equal(data.summary.collected, 500);
+  assert.deepEqual(JSON.parse(JSON.stringify(data.charts.collectionByClub)), [
+    { label: 'Report Club A', value: 350 },
+    { label: 'Report Club B', value: 150 }
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(data.charts.dailyCollections)), [
+    { label: 'Wed, 28 Oct, 2026', value: 350 },
+    { label: 'Thu, 29 Oct, 2026', value: 150 }
+  ]);
+  assert.equal(data.charts.weeklyCollections.length, 1);
+  assert.equal(data.charts.monthlyCollections.length, 1);
+
+  const previewHtml = api.renderAdminReportDocument(data);
+  const printHtml = api.adminReportPrintHtml(data);
+  for (const html of [previewHtml, printHtml]) {
+    assert.match(html, /Collections by club/);
+    assert.match(html, /Daily collections/);
+    assert.match(html, /Weekly collections/);
+    assert.match(html, /Monthly collections/);
+    assert.match(html, /Report Club A/);
+    assert.match(html, /28 Oct, 2026/);
+    assert.match(html, /admin-print-chart-value/);
+    assert.match(html, /admin-print-chart-label/);
+  }
+
+  api.state.adminAuthenticated = true;
+  api.state.modal = { type: 'adminReportExport' };
+  api.state.modalForm = { startDate: '2026-10-29', endDate: '2026-10-28', error: '' };
+  api.handleAction('previewAdminReport', { dataset: {} });
+  assert.equal(api.state.modalForm.error, 'Choose a valid start and end date.');
+
+  api.state.modalForm = { preview: true, reportData: data, error: '' };
+  context.window.open = () => null;
+  api.handleAction('downloadAdminReportPdf', { dataset: {} });
+  assert.match(api.state.modalForm.error, /print window was blocked/i);
 });
 
 test('deleted customers are accessible from Customers and offer restore or permanent delete', () => {
