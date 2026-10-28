@@ -583,11 +583,16 @@ test('owner can edit UPI pack prices and customer notification offers verified U
     id: 'payment-request-1', status: 'pending', pack_type: '6-day',
     total_shakes: 6, amount: 600, upi_id: 'owner@upi'
   };
-  const paymentUrl = api.upiPaymentLink(request);
-  assert.match(paymentUrl, /^upi:\/\/pay\?/);
+  const paymentUrl = api.upiPaymentLink(request, 'gpay');
+  assert.match(paymentUrl, /^intent:\/\/pay\?/);
+  assert.match(paymentUrl, /package=com\.google\.android\.apps\.nbu\.paisa\.user/);
   assert.match(paymentUrl, /pa=owner%40upi/);
   assert.match(paymentUrl, /am=600\.00/);
   assert.match(paymentUrl, /cu=INR/);
+  assert.equal(api.upiPaymentLink(request), '');
+  assert.match(api.upiPaymentLink(request, 'phonepe'), /package=com\.phonepe\.app/);
+  assert.match(api.upiPaymentLink(request, 'paytm'), /package=net\.one97\.paytm/);
+  assert.match(api.upiPaymentLink(request, 'supermoney'), /package=money\.super\.payments/);
 
   api.state.customerPaymentRequests = [request];
   api.state.paymentError = '';
@@ -600,11 +605,91 @@ test('owner can edit UPI pack prices and customer notification offers verified U
     }
   });
   assert.match(notification, /Payment notification/);
-  assert.match(notification, /Pay now with UPI/);
+  assert.match(notification, /Google Pay/);
+  assert.match(notification, /PhonePe/);
+  assert.match(notification, /Paytm/);
+  assert.match(notification, /SuperMoney/);
+  assert.match(notification, /Pending amount: ₹600/);
+  assert.doesNotMatch(notification, /Renew or choose a pack/);
+  assert.doesNotMatch(notification, /upi:\/\/pay\?/);
   assert.match(notification, /UPI transaction ID \/ UTR/);
   assert.match(notification, /I have paid/);
   assert.match(notification, /Decline request/);
   assert.match(notification, /activates only after the owner verifies payment/);
+  api.state.session = { profile: { clubId: 'club-pay' } };
+  assert.equal(api.portalFor({
+    name: 'Customer', packs: [], payments: [], visits: [], attendanceCounts: {}
+  }).pendingPackAmount, 600);
+});
+
+test('customers cannot choose or request their own renewal pack', () => {
+  const { api, context } = createApp();
+  context.CONFIG.packTypes = [{ id: '6-day', label: '6-day', totalShakes: 6, durationDays: 6 }];
+  api.state.customerPaymentRequests = [];
+  const portal = api.renderPortalCard({
+    name: 'Customer', shakesLeft: 1, shakesTotal: 6, lowAt: 2,
+    packExpiryDate: '', balance: 0, credit: 0, packs: [], payments: [],
+    visits: [], attendanceCounts: []
+  });
+  assert.doesNotMatch(portal, /Renew or choose a pack|Choose a pack to request|requestCustomerPack/);
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.doesNotMatch(appSource, /function requestCustomerPack/);
+  assert.doesNotMatch(appSource, /data-action="requestCustomerPack"/);
+});
+
+test('owner can set a custom shake count and amount for a customer renewal', () => {
+  const { api, context } = createApp();
+  context.CONFIG.packTypes = [
+    { id: '6-day', label: '6-day', totalShakes: 6, durationDays: 6 },
+    { id: 'custom', label: 'Custom', totalShakes: 30, durationDays: 30 }
+  ];
+  api.state.ownerPaymentSettings = { upiId: 'owner@upi', packPrices: { '6-day': 600 } };
+  const customer = {
+    id: 'renew-customer', name: 'Renew Customer', login: { uid: 'customer-uid' },
+    packs: [{ totalShakes: 6, usedOffset: 5, cost: 600, startDate: '2026-10-01', expiryDate: '2026-10-31' }],
+    payments: [], visits: []
+  };
+  api.state.customers = [customer];
+  api.state.session = {
+    status: 'in', role: 'owner', uid: 'owner-uid',
+    profile: { clubId: 'club-pay', clubName: 'Payment Club' }
+  };
+  api.state.modal = { type: 'renew', id: customer.id };
+  api.state.modalForm = { packType: 'custom', totalShakes: '18', cost: '1450', busy: false, error: '' };
+  const modal = api.renderModal();
+  assert.match(modal, /Pack size \(shakes\)/);
+  assert.match(modal, /Customer amount \(₹\)/);
+  assert.match(modal, /Send pack payment request/);
+
+  const calls = [];
+  api.setSupabaseClient({
+    rpc: (name, args) => {
+      calls.push({ name, args });
+      return Promise.resolve({ data: { id: args.request_id, status: 'pending' }, error: null });
+    },
+    from: () => {
+      const builder = {
+        select() { return builder; },
+        eq() { return builder; },
+        order() { return builder; },
+        limit() { return builder; },
+        then(resolve, reject) { return Promise.resolve({ data: [], error: null }).then(resolve, reject); }
+      };
+      return builder;
+    }
+  });
+  api.doRenewPack();
+  return Promise.resolve().then(() => Promise.resolve()).then(() => Promise.resolve()).then(() => {
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].name, 'create_owner_pack_request');
+    assert.equal(calls[0].args.target_customer_id, customer.id);
+    assert.equal(calls[0].args.target_pack_type, 'custom');
+    assert.equal(calls[0].args.target_total_shakes, 18);
+    assert.equal(calls[0].args.target_duration_days, 30);
+    assert.equal(calls[0].args.target_amount, 1450);
+    assert.equal(customer.packs.length, 1);
+    assert.equal(api.state.modal, null);
+  });
 });
 
 test('approval pack request does not activate the pack until owner payment verification', async () => {
@@ -758,6 +843,14 @@ test('signup rate-limit errors explain why owner requests are not listed', () =>
   assert.match(api.authErrorText({ code: 'over_request_rate_limit' }), /wait for the limit to reset/i);
 });
 
+test('outdated account function errors explain that deployment is required', () => {
+  const { api } = createApp();
+  assert.match(
+    api.authErrorText({ message: 'Unsupported account operation.' }),
+    /manage-account function is outdated.*Deploy the latest function/i
+  );
+});
+
 test('Supabase schema scopes data and protects owner approvals', () => {
   const schema = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'schema.sql'), 'utf8');
   assert.match(schema, /create table if not exists public\.owner_requests/);
@@ -821,6 +914,15 @@ test('UPI payment migration only activates packs after owner confirmation', () =
   assert.match(migration, /create or replace function public\.submit_customer_pack_payment/);
   assert.match(migration, /create or replace function public\.decline_customer_pack_request/);
   assert.match(migration, /create or replace function public\.review_customer_pack_payment/);
+  assert.match(migration, /target_total_shakes integer default null/);
+  assert.match(migration, /grant execute on function public\.create_owner_pack_request\(text, text, text, integer, integer, numeric\) to authenticated/);
+  assert.match(migration, /drop function if exists public\.create_customer_pack_request\(text, text\)/);
+  assert.doesNotMatch(migration, /create or replace function public\.create_customer_pack_request/);
+  assert.doesNotMatch(migration, /grant execute on function public\.create_owner_pack_offer/);
+  assert.match(migration, /current_pack ->> 'totalShakes'/);
+  assert.match(migration, /current_expiry \+ request_row\.duration_days/);
+  assert.match(migration, /pg_advisory_xact_lock\(hashtextextended\(customer_uid, 0\)\)/);
+  assert.match(migration, /requests\.status in \('pending', 'payment_submitted'\)/);
   assert.match(migration, /if request_row\.status <> 'payment_submitted'/);
   assert.match(migration, /if not approve_payment then/);
   assert.match(migration, /'status', 'confirmed'/);
