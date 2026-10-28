@@ -32,6 +32,7 @@ function createApp() {
     clearTimeout,
     console,
     URL,
+    URLSearchParams,
     Blob,
     alert() {}
   };
@@ -50,7 +51,10 @@ function createApp() {
       migrateBackupCustomer, portalFor, saveData, doSaveApprovalPack, renderLogin, currentClubName, renderAdminPage, renderAdminReports,
       applyAdminClubFilter, renderCustomers, renderDashboard, renderAdminClubs, valueBars, adminReportRanges, handleAction,
       renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP,
-      buildAdminReportData, renderAdminReportDocument, adminReportPrintHtml
+      buildAdminReportData, renderAdminReportDocument, adminReportPrintHtml,
+      renderOwnerPaymentSettings, renderPortalCard, upiPaymentLink,
+      saveOwnerPaymentSettings, doSaveApprovalPack, doRenewPack,
+      setSupabaseClient: function (client) { supabaseClient = client; }
     };
   `, context);
   return { api: context.testApi, context, root, listeners };
@@ -287,15 +291,76 @@ test('all admin navigation buttons open their matching screens', () => {
 
   for (const [tab, heading] of [
     ['clubs', 'Registered clubs'],
-    ['customers', 'Customers across registered clubs'],
-    ['orders', 'Orders across registered clubs'],
-    ['attendance', 'Last 7 days · daily visits'],
+    ['customers', 'Customers joined in this period'],
+    ['orders', 'Orders in this period'],
+    ['attendance', 'Attendance ·'],
     ['reports', 'Daily']
   ]) {
     api.handleAction('setAdminTab', { dataset: { value: tab } });
     assert.equal(api.state.adminTab, tab);
-    assert.match(api.renderAdminPage(), new RegExp(heading));
+    const html = api.renderAdminPage();
+    assert.match(html, new RegExp(heading));
+    if (['clubs', 'customers', 'orders', 'attendance'].includes(tab)) {
+      assert.match(html, /data-action="setAdminReportPeriod" data-value="daily"/);
+      assert.match(html, /data-action="setAdminReportPeriod" data-value="weekly"/);
+      assert.match(html, /data-action="setAdminReportPeriod" data-value="monthly"/);
+    }
   }
+});
+
+test('admin daily, weekly, and monthly controls filter the customer, order, and attendance pages', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  const today = new Date();
+  const dateString = date => date.getFullYear() + '-' +
+    String(date.getMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getDate()).padStart(2, '0');
+  const offsetDate = offset => {
+    const date = new Date(today);
+    date.setDate(date.getDate() + offset);
+    return dateString(date);
+  };
+  const recent = offsetDate(-3);
+  const priorMonth = offsetDate(-40);
+  api.state.adminClubs = [{
+    id: 'period-club', name: 'Period Club', approved: true,
+    ledger: {
+      customers: [
+        { id: 'customer-today', name: 'Today Customer', joinDate: offsetDate(0), visits: [offsetDate(0)], packs: [], payments: [] },
+        { id: 'customer-week', name: 'Week Customer', joinDate: recent, visits: [recent], packs: [], payments: [] },
+        { id: 'customer-month', name: 'Month Customer', joinDate: offsetDate(-15), visits: [offsetDate(-15)], packs: [], payments: [] },
+        { id: 'customer-older', name: 'Older Customer', joinDate: priorMonth, visits: [priorMonth], packs: [], payments: [] }
+      ],
+      orders: [
+        { id: 'order-today', customerName: 'Today Customer', date: offsetDate(0), items: [], payments: [] },
+        { id: 'order-week', customerName: 'Week Customer', date: recent, items: [], payments: [] },
+        { id: 'order-older', customerName: 'Older Customer', date: priorMonth, items: [], payments: [] }
+      ]
+    }
+  }];
+  api.applyAdminClubFilter();
+
+  api.state.adminTab = 'customers';
+  api.state.adminReportPeriod = 'daily';
+  assert.match(api.renderAdminPage(), /Today Customer/);
+  assert.doesNotMatch(api.renderAdminPage(), /Week Customer/);
+  api.state.adminReportPeriod = 'weekly';
+  assert.match(api.renderAdminPage(), /Week Customer/);
+  assert.doesNotMatch(api.renderAdminPage(), /Older Customer/);
+  api.state.adminReportPeriod = 'monthly';
+  assert.match(api.renderAdminPage(), /Month Customer/);
+  assert.doesNotMatch(api.renderAdminPage(), /Older Customer/);
+
+  api.state.adminTab = 'orders';
+  api.state.adminReportPeriod = 'weekly';
+  assert.match(api.renderAdminPage(), /Week Customer/);
+  assert.doesNotMatch(api.renderAdminPage(), /Older Customer/);
+
+  api.state.adminTab = 'attendance';
+  api.state.attendanceDate = offsetDate(0);
+  api.state.adminReportPeriod = 'weekly';
+  assert.match(api.renderAdminPage(), /Attendance ·/);
+  assert.match(api.renderAdminPage(), /data-value="weekly" aria-pressed="true"/);
 });
 
 test('admin dashboard metrics navigate to the correct workspace tabs', () => {
@@ -476,48 +541,120 @@ test('deleted customers are accessible from Customers and offer restore or perma
   assert.match(confirmHtml, /attendance, pack, and payment history/);
 });
 
-test('customer approval continues to a pack selection screen', () => {
-  const { api } = createApp();
+test('customer approval continues to a priced pack payment request', () => {
+  const { api, context } = createApp();
+  context.CONFIG.packTypes = [
+    { id: '6-day', label: '6-day', totalShakes: 6, durationDays: 6 },
+    { id: 'custom', label: 'Custom', totalShakes: 30, durationDays: 30 }
+  ];
+  api.state.ownerPaymentSettings = { upiId: 'owner@upi', packPrices: { '6-day': 600, custom: 3000 } };
   api.state.customers = [{
     id: 'approved-customer', name: 'Approved Customer', joinDate: '2026-10-01',
-    packs: [], payments: [], visits: []
+    login: { uid: 'customer-auth-uid' }, packs: [], payments: [], visits: []
   }];
   api.state.modal = { type: 'approvalPack', id: 'approved-customer' };
   api.state.modalForm = {
-    packType: '', totalShakes: '', cost: '', startDate: '2026-10-28',
-    initialPayment: '', busy: false, error: ''
+    packType: '6-day', busy: false, error: ''
   };
   const html = api.renderModal();
   assert.match(html, /Choose customer pack/);
-  assert.match(html, /Pack type \*/);
-  assert.match(html, /Pack cost \(₹\) \*/);
-  assert.match(html, /Save pack and finish approval/);
+  assert.match(html, /send a payment request/i);
+  assert.match(html, /6-day · 6 shakes · ₹600/);
+  assert.match(html, /Send payment request/);
+  assert.doesNotMatch(html, /Payment received now/);
 });
 
-test('approval pack save retains stable IDs and does not duplicate pack or payment on retry', async () => {
+test('owner can edit UPI pack prices and customer notification offers verified UPI payment', () => {
   const { api, context } = createApp();
-  context.CONFIG.packTypes = [{ id: 'custom', label: 'Custom', durationDays: 30 }];
+  context.CONFIG.packTypes = [
+    { id: '6-day', label: '6-day', totalShakes: 6, durationDays: 6 },
+    { id: 'custom', label: 'Custom', totalShakes: 30, durationDays: 30 }
+  ];
+  api.state.ownerPaymentSettings = {
+    upiId: 'owner@upi',
+    packPrices: { '6-day': 600, custom: 3000 }
+  };
+  const settings = api.renderOwnerPaymentSettings();
+  assert.match(settings, /Owner UPI ID/);
+  assert.match(settings, /data-bind="ownerPaymentSettings\.packPrices\.6-day"/);
+  assert.match(settings, /Save payment settings/);
+
+  const request = {
+    id: 'payment-request-1', status: 'pending', pack_type: '6-day',
+    total_shakes: 6, amount: 600, upi_id: 'owner@upi'
+  };
+  const paymentUrl = api.upiPaymentLink(request);
+  assert.match(paymentUrl, /^upi:\/\/pay\?/);
+  assert.match(paymentUrl, /pa=owner%40upi/);
+  assert.match(paymentUrl, /am=600\.00/);
+  assert.match(paymentUrl, /cu=INR/);
+
+  api.state.customerPaymentRequests = [request];
+  api.state.paymentError = '';
+  api.state.paymentSettingsMessage = '';
+  const notification = api.renderPortalCard({
+    name: 'Customer', shakesLeft: 0, shakesTotal: 0, lowAt: 2,
+    packExpiryDate: '', balance: 0, credit: 0, packs: [], payments: [],
+    visits: [], attendanceCounts: [], paymentSettings: {
+      upiId: 'owner@upi', packPrices: { '6-day': 600, custom: 3000 }
+    }
+  });
+  assert.match(notification, /Payment notification/);
+  assert.match(notification, /Pay now with UPI/);
+  assert.match(notification, /UPI transaction ID \/ UTR/);
+  assert.match(notification, /I have paid/);
+  assert.match(notification, /Decline request/);
+  assert.match(notification, /activates only after the owner verifies payment/);
+});
+
+test('approval pack request does not activate the pack until owner payment verification', async () => {
+  const { api, context } = createApp();
+  context.CONFIG.packTypes = [{ id: 'custom', label: 'Custom', totalShakes: 30, durationDays: 30 }];
+  api.state.ownerPaymentSettings = { upiId: 'owner@upi', packPrices: { custom: 3000 } };
+  api.state.session = {
+    status: 'in', role: 'owner', uid: 'owner-uid', username: 'Owner',
+    profile: { clubId: 'club-pay', clubName: 'Payment Club' }
+  };
   const customer = {
     id: 'approved-customer', name: 'Approved Customer', joinDate: '2026-10-01',
-    packs: [], payments: [], visits: []
+    login: { uid: 'customer-uid' }, packs: [], payments: [], visits: []
   };
   api.state.customers = [customer];
   api.state.modal = { type: 'approvalPack', id: customer.id };
   api.state.modalForm = {
-    packType: 'custom', totalShakes: '30', cost: '3000',
-    startDate: '2026-10-28', initialPayment: '500',
-    packId: 'stable-pack', paymentId: 'stable-payment', busy: false, error: ''
+    packType: 'custom', busy: false, error: ''
   };
+  const calls = [];
+  api.setSupabaseClient({
+    rpc: (name, args) => {
+      calls.push({ name, args });
+      return Promise.resolve({ data: { id: args.request_id, status: 'pending' }, error: null });
+    },
+    from: () => {
+      const builder = {
+        select() { return builder; },
+        eq() { return builder; },
+        order() { return builder; },
+        limit() { return builder; },
+        then(resolve, reject) { return Promise.resolve({ data: [], error: null }).then(resolve, reject); }
+      };
+      return builder;
+    }
+  });
 
   api.doSaveApprovalPack();
   await Promise.resolve();
-  api.doSaveApprovalPack();
+  await Promise.resolve();
   await Promise.resolve();
 
-  assert.equal(customer.packs.length, 1);
-  assert.equal(customer.packs[0].id, 'stable-pack');
-  assert.equal(customer.payments.length, 1);
-  assert.equal(customer.payments[0].id, 'stable-payment');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'create_owner_pack_request');
+  assert.equal(calls[0].args.target_customer_id, customer.id);
+  assert.equal(calls[0].args.target_pack_type, 'custom');
+  assert.equal(customer.packs.length, 0);
+  assert.equal(customer.payments.length, 0);
+  assert.equal(api.state.modal, null);
+  assert.match(api.state.paymentSettingsMessage, /after you confirm/);
 });
 
 test('pending customer registrations display their Supabase creation date', () => {
@@ -674,6 +811,30 @@ test('Supabase schema restricts ledger access to club owners', () => {
   const deletionMigration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261028000001_permanent_customer_deletion.sql'), 'utf8');
   assert.match(deletionMigration, /Move the customer to Deleted before permanent removal/);
   assert.match(deletionMigration, /to service_role/);
+});
+
+test('UPI payment migration only activates packs after owner confirmation', () => {
+  const migration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261029000000_manual_upi_pack_payments.sql'), 'utf8');
+  assert.match(migration, /create table if not exists public\.club_payment_settings/);
+  assert.match(migration, /create table if not exists public\.pack_payment_requests/);
+  assert.match(migration, /customer_uid = auth\.uid\(\)::text/);
+  assert.match(migration, /create or replace function public\.submit_customer_pack_payment/);
+  assert.match(migration, /create or replace function public\.decline_customer_pack_request/);
+  assert.match(migration, /create or replace function public\.review_customer_pack_payment/);
+  assert.match(migration, /if request_row\.status <> 'payment_submitted'/);
+  assert.match(migration, /if not approve_payment then/);
+  assert.match(migration, /'status', 'confirmed'/);
+  assert.match(migration, /'{lastModified}', to_jsonb\(now_ms\), true/);
+  assert.match(migration, /grant execute on function public\.review_customer_pack_payment\(text, boolean\) to authenticated/);
+  assert.match(migration, /array\['club_payment_settings', 'pack_payment_requests'\]/);
+
+  const schema = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'schema.sql'), 'utf8');
+  const combined = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'combined-migrations.sql'), 'utf8');
+  assert.match(schema, /create table if not exists public\.club_payment_settings/);
+  assert.match(combined, /create table if not exists public\.club_payment_settings/);
+  const marker = '-- Manual UPI pack request flow';
+  assert.equal(schema.slice(schema.indexOf(marker) + marker.length).trim(), migration.trim());
+  assert.equal(combined.slice(combined.indexOf(marker) + marker.length).trim(), migration.trim());
 });
 
 test('Vercel static deployment disables stale service worker caching', () => {
