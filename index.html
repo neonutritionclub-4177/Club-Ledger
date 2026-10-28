@@ -3282,21 +3282,12 @@ function renderCustomerPaymentNotifications() {
       ? `<p class="modal-sub">Your club will send you a specific pack and amount when a payment request is ready.</p>
         <button class="cancel" data-action="declinePackPayment" data-id="${escapeHtml(legacyOffer.id)}">Dismiss reminder</button>`
       : '';
-  const pastRequests = state.customerPaymentRequests.filter(function (request) {
-    return ['confirmed', 'declined', 'rejected'].includes(request.status);
-  }).slice(0, 3);
-  if (!active && !legacyOffer && !pastRequests.length && !state.paymentError) return '';
+  if (!active && !legacyOffer && !state.paymentError) return '';
   return `<div class="card payment-notification" role="status">
-    <h3 class="section-title">${active || legacyOffer ? 'Payment notification' : 'Payment history'}</h3>
+    <h3 class="section-title">Payment notification</h3>
     ${state.paymentError ? `<div class="auth-error" role="alert">${escapeHtml(state.paymentError)}</div>` : ''}
     ${state.paymentSettingsMessage ? `<div class="alert-banner ok" role="status">${escapeHtml(state.paymentSettingsMessage)}</div>` : ''}
     ${requestCard}
-    ${pastRequests.map(function (request) {
-      const label = request.status === 'confirmed'
-        ? 'Payment verified; pack activated'
-        : request.status === 'declined' ? 'Payment request declined' : 'Payment needs follow-up with your club';
-      return `<p class="field-hint">${escapeHtml(label)}${request.amount > 0 ? ' · ' + formatCurrency(request.amount) : ''}</p>`;
-    }).join('')}
   </div>`;
 }
 
@@ -3447,6 +3438,34 @@ function reviewCustomerPackPayment(requestId, approve) {
   });
 }
 
+function deleteCustomerPackRequest(requestId) {
+  if (!supabaseClient) {
+    state.paymentError = 'Connect to the internet to delete a payment request.';
+    render();
+    return;
+  }
+  const request = state.ownerPaymentRequests.find(function (entry) {
+    return entry.id === requestId;
+  });
+  if (!request) return;
+  if (!confirm('Delete this payment request for ' + formatCurrency(request.amount) +
+      '? This removes the request only; any confirmed payment and pack history will stay in the customer ledger.')) return;
+  state.paymentError = '';
+  supabaseClient.rpc('delete_customer_pack_request', {
+    target_request_id: requestId
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    state.ownerPaymentRequests = state.ownerPaymentRequests.filter(function (entry) {
+      return entry.id !== requestId;
+    });
+    state.paymentSettingsMessage = 'Payment request deleted. Customer ledger history was not changed.';
+    render();
+  }).catch(function (error) {
+    state.paymentError = error && error.message ? error.message : 'Unable to delete this payment request.';
+    render();
+  });
+}
+
 function createOwnerPackRequest(customerId, packType, packDetails) {
   if (!supabaseClient) return Promise.reject(new Error('Connect to the internet to send a pack payment request.'));
   const custom = packDetails || {};
@@ -3510,9 +3529,7 @@ function renderTab(totals) {
 }
 
 function renderOwnerPaymentRequests() {
-  const requests = state.ownerPaymentRequests.filter(function (request) {
-    return ['offered', 'pending', 'payment_submitted'].includes(request.status);
-  });
+  const requests = state.ownerPaymentRequests;
   if (!requests.length && !state.paymentError && !state.paymentSettingsMessage) return '';
   return `<div class="card">
     <h3 class="section-title">Customer payment requests (${requests.length})</h3>
@@ -3522,7 +3539,11 @@ function renderOwnerPaymentRequests() {
       const customer = state.customers.find(function (entry) { return entry.id === request.customer_id; });
       const status = request.status === 'payment_submitted'
         ? 'Payment reference submitted: ' + request.utr
-        : request.status === 'offered' ? 'Legacy reminder only; send a specific pack request' : 'Waiting for customer payment';
+        : request.status === 'offered' ? 'Legacy reminder only; send a specific pack request'
+          : request.status === 'pending' ? 'Waiting for customer payment'
+            : request.status === 'confirmed' ? 'Payment confirmed; pack activated'
+              : request.status === 'declined' ? 'Customer declined'
+                : request.status === 'rejected' ? 'Payment reference rejected' : 'Request status: ' + request.status;
       const whatsAppText = 'Hi ' + (customer ? customer.name : '') + ', your Club Ledger payment request is ' +
         (request.status === 'offered' ? 'not yet ready. The club owner will send a separate request with the pack and amount.' :
           'for ' + formatCurrency(request.amount) + ' (' + request.pack_type + ', ' +
@@ -3537,6 +3558,7 @@ function renderOwnerPaymentRequests() {
           ${customer && customer.phone ? `<a class="btn-remind" href="${escapeHtml(waLink(customer.phone, whatsAppText))}" target="_blank" rel="noopener noreferrer">WhatsApp</a>` : ''}
           ${request.status === 'payment_submitted' ? `<button class="btn-primary-sm" data-action="confirmPackPayment" data-id="${escapeHtml(request.id)}">Confirm &amp; activate</button>
             <button class="cancel" data-action="rejectPackPayment" data-id="${escapeHtml(request.id)}">Reject</button>` : ''}
+          <button class="cancel" data-action="deleteCustomerPackRequest" data-id="${escapeHtml(request.id)}">Delete request</button>
         </span>
       </div>`;
     }).join('')}
@@ -4630,7 +4652,7 @@ function renderRenewModal(m) {
   const idx = currentPackIndex(c);
   const remaining = idx >= 0 ? packShakesRemaining(c, idx) : 0;
   const prices = state.ownerPaymentSettings.packPrices || {};
-  const price = Number(prices[f.packType]) || 0;
+  const price = f.packType === 'custom' ? 0 : (Number(prices[f.packType]) || 0);
   const valid = Boolean(f.packType && (f.packType === 'custom'
     ? Number.isInteger(Number(f.totalShakes)) && Number(f.totalShakes) > 0 &&
       Number(f.totalShakes) <= 10000 &&
@@ -5034,6 +5056,9 @@ function handleAction(action, target) {
       break;
     case 'rejectPackPayment':
       reviewCustomerPackPayment(id, false);
+      break;
+    case 'deleteCustomerPackRequest':
+      deleteCustomerPackRequest(id);
       break;
     case 'submitPackPayment':
       submitCustomerPackPayment(id);
