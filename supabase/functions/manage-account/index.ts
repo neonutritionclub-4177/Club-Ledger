@@ -143,6 +143,59 @@ Deno.serve(async (request) => {
     if (membershipError) throw membershipError;
     if (!membership) return response({ error: "Club owner access is required." }, 403);
 
+    if (action === "customer-delete-permanently") {
+      const customerId = cleanText(body.customerId, 128);
+      if (!customerId) return response({ error: "Customer details are required." }, 400);
+
+      const { data: ledgerRow, error: ledgerError } = await admin
+        .from("club_ledgers")
+        .select("ledger")
+        .eq("club_id", clubId)
+        .maybeSingle();
+      if (ledgerError) throw ledgerError;
+      const customer = (ledgerRow?.ledger?.customers || []).find(
+        (entry: Record<string, unknown>) => entry.id === customerId,
+      );
+      if (customer && !customer.deleted) {
+        return response({ error: "Move this customer to Deleted before permanent removal." }, 409);
+      }
+
+      const customerUids = new Set<string>();
+      const login = customer?.login as Record<string, unknown> | undefined;
+      if (typeof login?.uid === "string") customerUids.add(login.uid);
+      const { data: registrations, error: registrationsError } = await admin
+        .from("customer_registrations")
+        .select("user_uid")
+        .eq("club_id", clubId)
+        .eq("linked_customer_id", customerId);
+      if (registrationsError) throw registrationsError;
+      for (const registration of registrations || []) customerUids.add(registration.user_uid);
+
+      for (const customerUid of customerUids) {
+        const { error: deleteAuthError } = await admin.auth.admin.deleteUser(customerUid);
+        if (deleteAuthError && deleteAuthError.status !== 404 &&
+            deleteAuthError.code !== "user_not_found") {
+          throw deleteAuthError;
+        }
+      }
+
+      const { data: purgeResult, error: purgeError } = await admin.rpc(
+        "permanently_delete_customer",
+        {
+          target_club_id: clubId,
+          target_customer_id: customerId,
+          actor_uid: callerUid,
+        },
+      );
+      if (purgeError) {
+        throw new Error(
+          "The customer login was removed, but their database history could not be purged. Retry permanent deletion. " +
+          purgeError.message,
+        );
+      }
+      return response({ customerId, removed: true, alreadyRemoved: !purgeResult?.removed });
+    }
+
     if (action === "customer-create") {
       const email = cleanEmail(body.email);
       const password = String(body.password || "");
