@@ -351,8 +351,7 @@ grant select on public.clubs, public.club_owners, public.owner_requests,
   public.customer_registrations, public.customer_portals, public.platform_admins
   to authenticated;
 grant select, insert, update on public.club_ledgers to authenticated;
-grant insert, update on public.customer_registrations
-  to authenticated;
+grant select, insert, update on public.customer_registrations to authenticated;
 grant insert, update, delete on public.customer_portals to authenticated;
 revoke all on function public.is_platform_admin() from public, anon, authenticated;
 revoke all on function public.is_club_owner(text) from public, anon, authenticated;
@@ -384,6 +383,10 @@ create policy "Club owners can access their ledger"
   on public.club_ledgers for all to authenticated
   using (public.is_club_owner(club_id))
   with check (public.is_club_owner(club_id));
+drop policy if exists "Platform admins can read all club ledgers" on public.club_ledgers;
+create policy "Platform admins can read all club ledgers"
+  on public.club_ledgers for select to authenticated
+  using (public.is_platform_admin());
 
 drop policy if exists "Users and admins can read owner requests" on public.owner_requests;
 create policy "Users and admins can read owner requests"
