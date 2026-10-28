@@ -315,13 +315,14 @@ input { font-family: inherit; }
 .hero-stat .split { display: flex; gap: 20px; margin-top: 12px; font-size: 0.75rem; color: var(--blue-100); }
 .hero-stat .split b { color: #fff; font-size: 0.9375rem; display: block; }
 .delta { display: inline-block; font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.18); margin-left: 8px; vertical-align: middle; }
-.vbars { display: flex; align-items: flex-end; justify-content: space-between; gap: 4px; }
-.vbar-col { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.vbars-scroll { overflow-x: auto; padding-bottom: 4px; }
+.vbars { display: flex; align-items: flex-end; gap: 8px; width: max-content; min-width: 100%; }
+.vbar-col { width: 42px; flex: 0 0 42px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .vbar-val { font-size: 0.5625rem; color: var(--slate-500); font-weight: 700; height: 12px; white-space: nowrap; }
 .vbar-track { width: 100%; height: 72px; background: var(--blue-50); border-radius: 6px; display: flex; align-items: flex-end; overflow: hidden; }
 .vbar-fill { width: 100%; background: var(--blue-700); border-radius: 6px 6px 0 0; min-height: 0; }
 .vbar-fill.cur { background: var(--green-600); }
-.vbar-day { font-size: 0.5625rem; color: var(--slate-400); }
+.vbar-day { width: 100%; min-height: 28px; text-align: center; white-space: normal; line-height: 1.2; font-size: 0.625rem; color: var(--slate-500); }
 .rank-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--slate-100); }
 .rank-row:last-child { border-bottom: none; }
 .rank-no { width: 24px; height: 24px; border-radius: 999px; background: var(--blue-50); color: var(--blue-700); font-weight: 900; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -378,13 +379,39 @@ html[data-theme="dark"] .field-hint { color: #cbd5e1; }
 .admin-chart-card { overflow: hidden; }
 .admin-chart-title { margin: 0 0 10px; font-size: .9rem; font-weight: 800; color: var(--slate-700); }
 .admin-chart-scroll { overflow-x: auto; overflow-y: hidden; padding: 8px 8px 0; }
-.admin-chart-grid { display: flex; align-items: flex-end; gap: 12px; min-width: max-content; min-height: 255px; padding: 0 12px 0; }
-.admin-chart-col { display: flex; flex-direction: column; align-items: center; width: 66px; }
+.admin-chart-grid { display: flex; align-items: stretch; gap: 12px; min-width: max-content; padding: 0 12px 12px; }
+.admin-chart-col { display: grid; grid-template-rows: 24px 150px minmax(44px, auto); justify-items: center; width: 90px; }
 .admin-chart-value { height: 24px; font-size: .7rem; font-weight: 800; color: var(--slate-700); white-space: nowrap; }
 .admin-chart-track { width: 36px; height: 150px; display: flex; align-items: flex-end; background: linear-gradient(to bottom, transparent 24%, var(--slate-100) 25%, transparent 25%, transparent 49%, var(--slate-100) 50%, transparent 51%, transparent 74%, var(--slate-100) 75%, transparent 76%); border-bottom: 1px solid var(--slate-300); }
 .admin-chart-bar { width: 100%; min-height: 2px; background: #4b83bd; border-radius: 5px 5px 0 0; }
-.admin-chart-name { width: 120px; height: 76px; margin: 8px 0 0; transform: rotate(-45deg); transform-origin: top left; white-space: nowrap; color: var(--slate-700); font-size: .68rem; }
+.admin-chart-name { align-self: start; width: 100%; margin-top: 8px; overflow-wrap: anywhere; text-align: center; color: var(--slate-700); font-size: .68rem; line-height: 1.25; }
 .admin-chart-empty { color: var(--slate-500); font-size: .875rem; padding: 12px 0; }
+.admin-export-modal { width: min(100%, 920px); max-height: calc(100vh - 32px); overflow: auto; }
+.admin-pdf-preview { max-height: 48vh; overflow: auto; border: 1px solid var(--slate-200); border-radius: 10px; padding: 14px; margin: 12px 0; }
+.admin-print-report { color: #172033; font: 12px/1.45 Arial, sans-serif; }
+.admin-print-report h1 { font-size: 22px; margin: 0 0 6px; }
+.admin-print-report header p { margin: 2px 0; }
+.admin-print-report section { margin-top: 18px; break-inside: avoid; }
+.admin-print-report h2 { font-size: 15px; border-bottom: 1px solid #cbd5e1; padding-bottom: 5px; }
+.admin-print-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.admin-print-summary div { padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
+.admin-print-summary strong, .admin-print-summary span { display: block; }
+.admin-print-summary strong { font-size: 15px; }
+.admin-print-summary span { color: #475569; }
+.admin-print-table-wrap { overflow-x: auto; }
+.admin-print-table { border-collapse: collapse; width: 100%; font-size: 10px; }
+.admin-print-table th, .admin-print-table td { border: 1px solid #cbd5e1; padding: 5px 6px; text-align: left; vertical-align: top; }
+.admin-print-table th { background: #eaf1fb; }
+.admin-print-empty { color: #64748b; font-style: italic; }
+.admin-print-chart { margin: 10px 0 14px; padding: 8px; border: 1px solid #d7dfeb; border-radius: 6px; break-inside: avoid; }
+.admin-print-chart h3 { margin: 0 0 6px; font-size: 12px; }
+.admin-print-chart-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.admin-print-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); align-items: end; gap: 4px; padding-top: 6px; }
+.admin-print-chart-col { display: grid; grid-template-rows: 16px 98px minmax(30px, auto); justify-items: center; min-width: 0; }
+.admin-print-chart-value { font-size: 8px; white-space: nowrap; }
+.admin-print-chart-track { width: 18px; height: 95px; display: flex; align-items: end; border-bottom: 1px solid #94a3b8; background: repeating-linear-gradient(to bottom, transparent 0 23px, #eef2f7 24px 25px); }
+.admin-print-chart-bar { width: 100%; min-height: 2px; background: #4b83bd; border-radius: 3px 3px 0 0; }
+.admin-print-chart-label { width: 100%; padding-top: 4px; text-align: center; overflow-wrap: anywhere; font-size: 8px; line-height: 1.2; }
 .admin-club-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--slate-100); }
 .admin-club-row:last-child { border-bottom: 0; }
 .admin-club-name { margin: 0; color: var(--slate-800); font-weight: 800; }
@@ -397,8 +424,9 @@ html[data-theme="dark"] .admin-club-row { border-color: #334155; }
 .admin-nav button span { white-space: nowrap; font-size: .64rem; }
 @media (max-width: 520px) {
   .admin-chart-grid { gap: 8px; padding-left: 6px; padding-right: 6px; }
-  .admin-chart-col { width: 58px; }
+  .admin-chart-col { width: 78px; }
   .admin-chart-name { font-size: .62rem; }
+  .vbar-col { width: 40px; flex-basis: 40px; }
 }
 </style>
 </head>
@@ -2127,7 +2155,7 @@ function adminReportRanges(period) {
     return Array.from({ length: 8 }, function (_, index) {
       const end = addDays(today, -7 * (7 - index));
       const start = addDays(end, -6);
-      return { start: start, end: end, label: formatDateShort(start) + '–' + formatDateShort(end) };
+      return { start: start, end: end, label: formatDateShort(start) + ' – ' + formatDateShort(end) };
     });
   }
   if (period === 'monthly') {
@@ -2137,13 +2165,13 @@ function adminReportRanges(period) {
       return {
         start: month + '-01',
         end: month === currentMonth ? today : month + '-' + daysInMonth(month),
-        label: formatMonthShort(month)
+        label: formatMonthLong(month)
       };
     });
   }
   return Array.from({ length: 14 }, function (_, index) {
     const date = addDays(today, index - 13);
-    return { start: date, end: date, label: String(Number(date.slice(8))) };
+    return { start: date, end: date, label: formatDateShort(date) };
   });
 }
 
@@ -2151,7 +2179,9 @@ function renderAdminBarChart(title, items, currency) {
   if (!items.length) {
     return `<div class="card admin-chart-card"><h3 class="admin-chart-title">${escapeHtml(title)}</h3><p class="admin-chart-empty">No registered clubs or report data to chart.</p></div>`;
   }
-  const max = Math.max(1, ...items.map(function (item) { return Number(item.value) || 0; }));
+  const max = items.reduce(function (currentMax, item) {
+    return Math.max(currentMax, Number(item.value) || 0);
+  }, 1);
   return `<div class="card admin-chart-card">
     <h3 class="admin-chart-title">${escapeHtml(title)}</h3>
     <div class="admin-chart-scroll"><div class="admin-chart-grid">
@@ -2320,7 +2350,8 @@ function renderAdminReports() {
       ? 'Collections today by club'
       : period === 'weekly' ? 'Collections this week by club' : 'Collections this month by club';
     const total = items.reduce(function (sum, item) { return sum + item.value; }, 0);
-    return `${controls}<div class="card"><h3 class="section-title">All registered clubs · ${period} total</h3><p class="stat-value">${formatCurrency(total)}</p></div>
+    return `${controls}<div class="card"><button class="btn-primary-sm" data-action="openAdminReportExport">Preview &amp; download all reports as PDF</button></div>
+      <div class="card"><h3 class="section-title">All registered clubs · ${period} total</h3><p class="stat-value">${formatCurrency(total)}</p></div>
       ${renderAdminBarChart(title, items, true)}
       <div class="card"><h3 class="section-title">${title}</h3>
         ${items.length ? items.map(function (item) {
@@ -2340,7 +2371,7 @@ function renderAdminReports() {
     };
   });
   const total = items.reduce(function (sum, item) { return sum + item.value; }, 0);
-  return `${controls}
+  return `${controls}<div class="card"><button class="btn-primary-sm" data-action="openAdminReportExport">Preview &amp; download all reports as PDF</button></div>
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-value">${formatCurrency(total)}</div><div class="stat-label">Collected · ${period}</div></div>
       <div class="stat-card"><div class="stat-value">${adminClubCustomers(club).length}</div><div class="stat-label">Active customers</div></div>
@@ -2354,6 +2385,338 @@ function renderAdminReports() {
         return `<div class="report-row"><p class="name">${escapeHtml(item.label)}</p><p class="amt">${formatCurrency(item.value)}</p></div>`;
       }).join('')}
     </div>`;
+}
+
+function reportDateBuckets(startDate, endDate, unit) {
+  const buckets = [];
+  let cursor = startDate;
+  while (cursor <= endDate) {
+    let bucketEnd = cursor;
+    if (unit === 'weekly') bucketEnd = addDays(cursor, 6);
+    if (unit === 'monthly') {
+      const month = cursor.slice(0, 7);
+      bucketEnd = month + '-' + daysInMonth(month);
+    }
+    if (bucketEnd > endDate) bucketEnd = endDate;
+    buckets.push({
+      start: cursor,
+      end: bucketEnd,
+      label: unit === 'monthly'
+        ? formatMonthLong(cursor.slice(0, 7))
+        : unit === 'weekly'
+          ? formatDateShort(cursor) + ' – ' + formatDateShort(bucketEnd)
+          : formatDateLong(cursor)
+    });
+    cursor = addDays(bucketEnd, 1);
+  }
+  return buckets;
+}
+
+function sumPaymentsInRange(records, startDate, endDate) {
+  return records.reduce(function (sum, record) {
+    return sum + (record.payments || []).filter(function (payment) {
+      return !payment.deleted && payment.date >= startDate && payment.date <= endDate;
+    }).reduce(function (paid, payment) {
+      return paid + (Number(payment.amount) || 0);
+    }, 0);
+  }, 0);
+}
+
+function renderAdminReportTable(headers, rows, emptyMessage) {
+  return rows.length
+    ? `<div class="admin-print-table-wrap"><table class="admin-print-table">
+        <thead><tr>${headers.map(function (header) { return '<th>' + escapeHtml(header) + '</th>'; }).join('')}</tr></thead>
+        <tbody>${rows.map(function (row) {
+          return '<tr>' + row.map(function (value) { return '<td>' + escapeHtml(value) + '</td>'; }).join('') + '</tr>';
+        }).join('')}</tbody>
+      </table></div>`
+    : `<p class="admin-print-empty">${escapeHtml(emptyMessage)}</p>`;
+}
+
+function buildAdminReportData(startDate, endDate, scope) {
+  const clubs = scope === 'all'
+    ? state.adminClubs
+    : adminSelectedClubs().slice(0, 1);
+  const prepared = clubs.map(function (club) {
+    const customers = adminClubCustomers(club).map(function (customer) {
+      return migrateCustomer(JSON.parse(JSON.stringify(customer)));
+    });
+    const orders = adminClubOrders(club).map(function (order) {
+      return migrateOrder(JSON.parse(JSON.stringify(order)));
+    });
+    return { club: club, customers: customers, orders: orders };
+  });
+  const periods = {
+    daily: reportDateBuckets(startDate, endDate, 'daily'),
+    weekly: reportDateBuckets(startDate, endDate, 'weekly'),
+    monthly: reportDateBuckets(startDate, endDate, 'monthly')
+  };
+  const summary = prepared.reduce(function (totals, entry) {
+    const collection = sumPaymentsInRange(entry.customers, startDate, endDate) +
+      sumPaymentsInRange(entry.orders, startDate, endDate);
+    const outstanding = entry.customers.reduce(function (sum, customer) {
+      return sum + Math.max(0, balanceOf(customer));
+    }, 0) + entry.orders.reduce(function (sum, order) {
+      return sum + Math.max(0, orderBalance(order));
+    }, 0);
+    return {
+      customers: totals.customers + entry.customers.length,
+      orders: totals.orders + entry.orders.length,
+      collected: totals.collected + collection,
+      outstanding: totals.outstanding + outstanding,
+      visits: totals.visits + adminVisitsInRange(entry.club, startDate, endDate)
+    };
+  }, { customers: 0, orders: 0, collected: 0, outstanding: 0, visits: 0 });
+
+  function periodRows(bucketList) {
+    return bucketList.flatMap(function (bucket) {
+      return prepared.map(function (entry) {
+        return [
+          bucket.label,
+          entry.club.name,
+          formatCurrency(sumPaymentsInRange(entry.customers, bucket.start, bucket.end) +
+            sumPaymentsInRange(entry.orders, bucket.start, bucket.end)),
+          String(adminVisitsInRange(entry.club, bucket.start, bucket.end))
+        ];
+      });
+    });
+  }
+
+  const clubRows = prepared.map(function (entry) {
+    return [
+      entry.club.name,
+      formatCurrency(sumPaymentsInRange(entry.customers, startDate, endDate) +
+        sumPaymentsInRange(entry.orders, startDate, endDate)),
+      String(adminVisitsInRange(entry.club, startDate, endDate)),
+      String(entry.customers.length),
+      String(entry.orders.length)
+    ];
+  });
+  const customerRows = prepared.flatMap(function (entry) {
+    return entry.customers.map(function (customer) {
+      const paid = sumPaymentsInRange([customer], startDate, endDate);
+      const due = Math.max(0, balanceOf(customer));
+      return paid > 0 || due > 0
+        ? [[entry.club.name, customer.name, formatCurrency(paid), formatCurrency(due)]]
+        : [];
+    });
+  });
+  const orderRows = prepared.flatMap(function (entry) {
+    return entry.orders.filter(function (order) {
+      return (order.date >= startDate && order.date <= endDate) ||
+        (order.payments || []).some(function (payment) {
+          return !payment.deleted && payment.date >= startDate && payment.date <= endDate;
+        });
+    }).map(function (order) {
+      return [
+        entry.club.name,
+        formatDateShort(order.date),
+        order.customerName || 'Walk-in',
+        (order.items || []).filter(function (item) { return !item.deleted; }).map(function (item) {
+          return item.name + ' × ' + (Number(item.quantity) || 1);
+        }).join(', ') || '—',
+        formatCurrency(sumPaymentsInRange([order], startDate, endDate)),
+        formatCurrency(Math.max(0, orderBalance(order)))
+      ];
+    });
+  });
+  const attendanceRows = [];
+  periods.daily.forEach(function (bucket) {
+    prepared.forEach(function (entry) {
+      let visitors = 0;
+      let shakes = 0;
+      entry.customers.forEach(function (customer) {
+        const count = attendanceCount(customer, bucket.start);
+        if (count > 0) visitors++;
+        shakes += count;
+      });
+      if (visitors > 0 || shakes > 0) {
+        attendanceRows.push([bucket.label, entry.club.name, String(visitors), String(shakes)]);
+      }
+    });
+  });
+  function chartRows(bucketList) {
+    return bucketList.map(function (bucket) {
+      return {
+        label: bucket.label,
+        value: prepared.reduce(function (sum, entry) {
+          return sum + sumPaymentsInRange(entry.customers, bucket.start, bucket.end) +
+            sumPaymentsInRange(entry.orders, bucket.start, bucket.end);
+        }, 0)
+      };
+    });
+  }
+  const collectionByClub = prepared.map(function (entry) {
+    return {
+      label: entry.club.name,
+      value: sumPaymentsInRange(entry.customers, startDate, endDate) +
+        sumPaymentsInRange(entry.orders, startDate, endDate)
+    };
+  });
+  const customersByClub = prepared.map(function (entry) {
+    return { label: entry.club.name, value: entry.customers.length };
+  });
+  const ordersByClub = prepared.map(function (entry) {
+    return { label: entry.club.name, value: entry.orders.length };
+  });
+  const visitsByClub = prepared.map(function (entry) {
+    return {
+      label: entry.club.name,
+      value: adminVisitsInRange(entry.club, startDate, endDate)
+    };
+  });
+  return {
+    startDate: startDate,
+    endDate: endDate,
+    generatedAt: new Date().toLocaleString('en-IN'),
+    clubs: clubRows,
+    summary: summary,
+    daily: periodRows(periods.daily),
+    weekly: periodRows(periods.weekly),
+    monthly: periodRows(periods.monthly),
+    customers: customerRows,
+    orders: orderRows,
+    attendance: attendanceRows,
+    charts: {
+      collectionByClub: collectionByClub,
+      customersByClub: customersByClub,
+      ordersByClub: ordersByClub,
+      visitsByClub: visitsByClub,
+      dailyCollections: chartRows(periods.daily),
+      weeklyCollections: chartRows(periods.weekly),
+      monthlyCollections: chartRows(periods.monthly)
+    }
+  };
+}
+
+function renderAdminPrintChart(title, items, currency) {
+  if (!items.length) return '<p class="admin-print-empty">No chart data.</p>';
+  const max = Math.max(1, ...items.map(function (item) { return Number(item.value) || 0; }));
+  return `<div class="admin-print-chart">
+    <h3>${escapeHtml(title)}</h3>
+    <div class="admin-print-chart-grid">${items.map(function (item) {
+      const value = Number(item.value) || 0;
+      const height = value > 0 ? Math.max(3, Math.round(value / max * 95)) : 0;
+      const valueLabel = currency ? formatCurrency(value) : String(value);
+      return `<div class="admin-print-chart-col">
+        <strong class="admin-print-chart-value">${escapeHtml(valueLabel)}</strong>
+        <div class="admin-print-chart-track"><div class="admin-print-chart-bar" style="height:${height}px"></div></div>
+        <span class="admin-print-chart-label">${escapeHtml(item.label)}</span>
+      </div>`;
+    }).join('')}</div>
+  </div>`;
+}
+
+function renderAdminReportDocument(data) {
+  const sections = [
+    '<section><h2>1. Summary</h2><div class="admin-print-summary">' +
+      [
+        ['Registered clubs', String(data.clubs.length)],
+        ['Active customers', String(data.summary.customers)],
+        ['Orders', String(data.summary.orders)],
+        ['Collections', formatCurrency(data.summary.collected)],
+        ['Outstanding balance', formatCurrency(data.summary.outstanding)],
+        ['Customer visit-days', String(data.summary.visits)]
+      ].map(function (item) {
+        return '<div><strong>' + escapeHtml(item[1]) + '</strong><span>' + escapeHtml(item[0]) + '</span></div>';
+      }).join('') + '</div></section>',
+    '<section><h2>2. Club comparison</h2><div class="admin-print-chart-pair">' +
+      renderAdminPrintChart('Collections by club', data.charts.collectionByClub, true) +
+      renderAdminPrintChart('Active customers by club', data.charts.customersByClub, false) +
+      renderAdminPrintChart('Orders by club', data.charts.ordersByClub, false) +
+      renderAdminPrintChart('Visits by club', data.charts.visitsByClub, false) +
+      '</div>' + renderAdminReportTable(
+      ['Club', 'Collections', 'Visits', 'Customers', 'Orders'], data.clubs, 'No registered clubs.'
+    ) + '</section>',
+    '<section><h2>3. Daily report</h2>' + renderAdminPrintChart(
+      'Daily collections', data.charts.dailyCollections, true
+    ) + renderAdminReportTable(
+      ['Date', 'Club', 'Collected', 'Visits'], data.daily, 'No daily data.'
+    ) + '</section>',
+    '<section><h2>4. Weekly report</h2>' + renderAdminPrintChart(
+      'Weekly collections', data.charts.weeklyCollections, true
+    ) + renderAdminReportTable(
+      ['Week', 'Club', 'Collected', 'Visits'], data.weekly, 'No weekly data.'
+    ) + '</section>',
+    '<section><h2>5. Monthly report</h2>' + renderAdminPrintChart(
+      'Monthly collections', data.charts.monthlyCollections, true
+    ) + renderAdminReportTable(
+      ['Month', 'Club', 'Collected', 'Visits'], data.monthly, 'No monthly data.'
+    ) + '</section>',
+    '<section><h2>6. Customer report</h2>' + renderAdminReportTable(
+      ['Club', 'Customer', 'Paid in range', 'Current balance due'], data.customers, 'No customer payments or outstanding balances in this report.'
+    ) + '</section>',
+    '<section><h2>7. Order report</h2>' + renderAdminReportTable(
+      ['Club', 'Order date', 'Customer', 'Items', 'Paid in range', 'Balance due'], data.orders, 'No orders in this report.'
+    ) + '</section>',
+    '<section><h2>8. Attendance report</h2>' + renderAdminReportTable(
+      ['Date', 'Club', 'Customers visited', 'Shakes served'], data.attendance, 'No attendance recorded in this report.'
+    ) + '</section>'
+  ];
+  return `<article class="admin-print-report">
+    <header><h1>Club Ledger — Admin Report</h1>
+      <p>Generated ${escapeHtml(data.generatedAt)}</p>
+      <p>Coverage: ${escapeHtml(formatDateLong(data.startDate))} to ${escapeHtml(formatDateLong(data.endDate))}</p>
+      <p>Scope: ${escapeHtml(data.clubs.map(function (row) { return row[0]; }).join(', ') || 'All registered clubs')}</p>
+    </header>${sections.join('')}
+  </article>`;
+}
+
+function adminReportPrintHtml(data) {
+  const report = renderAdminReportDocument(data);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Club Ledger Admin Report</title>
+    <style>
+      body{margin:24px;color:#172033;font:12px/1.45 Arial,sans-serif}
+      .admin-print-report h1{font-size:22px;margin:0 0 6px}
+      .admin-print-report header p{margin:2px 0}
+      .admin-print-report section{margin-top:18px;break-inside:avoid}
+      .admin-print-report h2{font-size:15px;border-bottom:1px solid #cbd5e1;padding-bottom:5px}
+      .admin-print-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+      .admin-print-summary div{padding:8px;border:1px solid #cbd5e1;border-radius:6px}
+      .admin-print-summary strong,.admin-print-summary span{display:block}
+      .admin-print-summary strong{font-size:15px}
+      .admin-print-summary span{color:#475569}
+      .admin-print-table{border-collapse:collapse;width:100%;font-size:10px}
+      .admin-print-table th,.admin-print-table td{border:1px solid #cbd5e1;padding:5px 6px;text-align:left;vertical-align:top}
+      .admin-print-table th{background:#eaf1fb}
+      .admin-print-empty{color:#64748b;font-style:italic}
+      .admin-print-chart{margin:10px 0 14px;padding:8px;border:1px solid #d7dfeb;border-radius:6px;break-inside:avoid}
+      .admin-print-chart h3{margin:0 0 6px;font-size:12px}
+      .admin-print-chart-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+      .admin-print-chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(48px,1fr));align-items:end;gap:4px;padding-top:6px}
+      .admin-print-chart-col{display:grid;grid-template-rows:16px 98px minmax(30px,auto);justify-items:center;min-width:0}
+      .admin-print-chart-value{font-size:8px;white-space:nowrap}
+      .admin-print-chart-track{width:18px;height:95px;display:flex;align-items:end;border-bottom:1px solid #94a3b8;background:repeating-linear-gradient(to bottom,transparent 0 23px,#eef2f7 24px 25px)}
+      .admin-print-chart-bar{width:100%;min-height:2px;background:#4b83bd;border-radius:3px 3px 0 0}
+      .admin-print-chart-label{width:100%;padding-top:4px;text-align:center;overflow-wrap:anywhere;font-size:8px;line-height:1.2}
+      @media print{body{margin:12mm}.admin-print-report section{break-inside:auto}tr{break-inside:avoid}}
+    </style>
+  </head><body>${report}<script>window.addEventListener('load',function(){window.focus();window.print();});<\/script></body></html>`;
+}
+
+function renderAdminReportExportModal() {
+  const form = state.modalForm || {};
+  const valid = form.startDate && form.endDate && form.startDate <= form.endDate &&
+    !form.busy;
+  return `<div class="modal-overlay">
+    <section class="modal-card admin-export-modal" role="dialog" aria-modal="true">
+      <div class="modal-head"><h2>${form.preview ? 'Preview admin report' : 'Prepare PDF report'}</h2><button data-action="closeModal" aria-label="Close">${ICONS.x}</button></div>
+      ${form.error ? `<div class="auth-error" role="alert">${escapeHtml(form.error)}</div>` : ''}
+      ${form.preview ? `<div class="admin-pdf-preview">${renderAdminReportDocument(form.reportData)}</div>
+        <div class="confirm-actions">
+          <button class="cancel" data-action="backToAdminReportDates">Change dates</button>
+          <button class="btn-primary-sm" data-action="downloadAdminReportPdf">Open print / Save PDF</button>
+        </div>
+        <p class="field-hint">In the print window, choose “Save as PDF” to store the report for offline use.</p>`
+        : `        <p class="modal-sub">Choose a date range. Both dates open your device calendar. The report includes all registered clubs, chart comparisons, and daily, weekly, monthly, customer, order, and attendance sections.</p>
+          <div class="field"><label for="admin-report-start">Start date</label><input id="admin-report-start" type="date" data-bind="modalForm.startDate" value="${escapeHtml(form.startDate || '')}"></div>
+          <div class="field"><label for="admin-report-end">End date</label><input id="admin-report-end" type="date" data-bind="modalForm.endDate" value="${escapeHtml(form.endDate || '')}"></div>
+          <div class="confirm-actions"><button class="cancel" data-action="closeModal">Cancel</button>
+            <button class="btn-primary-sm" data-action="previewAdminReport" ${valid ? '' : 'disabled'}>Preview report</button>
+          </div>`}
+    </section>
+  </div>`;
 }
 
 function renderAdminClubs() {
@@ -3267,12 +3630,12 @@ function monthRevenueTotal(monthStr) { return computeMonthlyStats(monthStr).reve
 
 function valueBars(labels, values, highlightIdx) {
   const max = Math.max(1, ...values);
-  return `<div class="vbars">${labels.map((l, i) => `
+  return `<div class="vbars-scroll"><div class="vbars">${labels.map((l, i) => `
     <div class="vbar-col">
       <span class="vbar-val">${values[i] > 0 ? shortINR(values[i]) : ''}</span>
       <div class="vbar-track"><div class="vbar-fill ${i === highlightIdx ? 'cur' : ''}" style="height:${(values[i] / max * 72)}px"></div></div>
       <span class="vbar-day">${l}</span>
-    </div>`).join('')}</div>`;
+    </div>`).join('')}</div></div>`;
 }
 
 function renderReports() {
@@ -3295,7 +3658,7 @@ function renderDailyReport() {
   const data = dayData(d);
   const days = Array.from({ length: 14 }, (_, i) => addDays(today, -13 + i));
   const totals = days.map(x => dayData(x).total);
-  const labels = days.map(x => String(Number(x.slice(8))));
+  const labels = days.map(formatDateShort);
   const selIdx = days.indexOf(d);
   const rows = data.club.map(x => ({ ...x, kind: 'Pack' })).concat(data.orders.map(x => ({ ...x, kind: 'Order' }))).sort((a, b) => b.ts - a.ts);
 
@@ -3403,7 +3766,7 @@ function renderMonthlyReport() {
     </div>
     <div class="card">
       <p class="payments-title">Last 6 months — total revenue</p>
-      ${valueBars(last6.map(formatMonthShort), sixTotals, last6.indexOf(month))}
+      ${valueBars(last6.map(formatMonthLong), sixTotals, last6.indexOf(month))}
     </div>
 
     <h3 class="section-title standalone">Club — packs &amp; shakes</h3>
@@ -3425,7 +3788,7 @@ function renderMonthlyReport() {
     </div>
     <div class="card">
       <p class="payments-title">Last 6 months — orders revenue</p>
-      ${valueBars(last6.map(formatMonthShort), orderRevs, last6.indexOf(month))}
+      ${valueBars(last6.map(formatMonthLong), orderRevs, last6.indexOf(month))}
     </div>
     <div class="card">
       <h3 class="section-title">By customer — orders, ${formatMonthLong(month)}</h3>
@@ -3577,6 +3940,7 @@ function renderModal() {
   if (m.type === 'addOwner') return renderAddOwnerModal();
   if (m.type === 'linkRegistration') return renderLinkRegistrationModal(m);
   if (m.type === 'adminEditOwner') return renderAdminOwnerEditModal();
+  if (m.type === 'adminReportExport') return renderAdminReportExportModal();
   return '';
 }
 
@@ -4112,6 +4476,65 @@ function handleAction(action, target) {
         : 'daily';
       render();
       break;
+    case 'openAdminReportExport': {
+      const today = todayStr();
+      state.modal = { type: 'adminReportExport' };
+      state.modalForm = {
+        startDate: today.slice(0, 7) + '-01',
+        endDate: today,
+        preview: false,
+        reportData: null,
+        error: ''
+      };
+      render();
+      break;
+    }
+    case 'previewAdminReport': {
+      const form = state.modalForm;
+      if (!form || !form.startDate || !form.endDate || form.startDate > form.endDate) {
+        if (form) form.error = 'Choose a valid start and end date.';
+        render();
+        break;
+      }
+      if (!state.adminClubs.length) {
+        form.error = 'No registered club data is available to include in this report.';
+        render();
+        break;
+      }
+      form.reportData = buildAdminReportData(form.startDate, form.endDate, 'all');
+      form.preview = true;
+      form.error = '';
+      render();
+      break;
+    }
+    case 'backToAdminReportDates':
+      if (state.modalForm) {
+        state.modalForm.preview = false;
+        state.modalForm.error = '';
+      }
+      render();
+      break;
+    case 'downloadAdminReportPdf': {
+      const form = state.modalForm;
+      if (!form || !form.preview || !form.reportData) break;
+      try {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) {
+          form.error = 'The print window was blocked. Allow popups for this site and try again.';
+          render();
+          break;
+        }
+        printWindow.document.open();
+        printWindow.document.write(adminReportPrintHtml(form.reportData));
+        printWindow.document.close();
+      } catch (error) {
+        form.error = error && error.message
+          ? 'Unable to open the PDF preview: ' + error.message
+          : 'Unable to open the PDF preview. Allow popups and try again.';
+        render();
+      }
+      break;
+    }
     case 'setTab':
       state.tab = target.dataset.value;
       state.expandedId = null;
@@ -5039,7 +5462,7 @@ document.body.addEventListener('change', function (e) {
     setPath(state, e.target.dataset.bind, e.target.value);
     if (e.target.dataset.bind === 'adminForm.clubFilter') applyAdminClubFilter();
     updateBoundFormControls();
-    if (e.target.tagName === 'SELECT' || e.target.type === 'month') render();
+    if (e.target.tagName === 'SELECT' || e.target.type === 'month' || e.target.type === 'date') render();
   }
 });
 
