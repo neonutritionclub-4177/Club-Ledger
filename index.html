@@ -610,6 +610,7 @@ let supabaseClient = null;
 let supabaseChannel = null;
 let registrationChannel = null;
 let portalChannel = null;
+let paymentRequestsChannel = null;
 let activeStorageKey = STORAGE_KEY;
 let directoryLoaded = false;
 const adminRoute = Boolean(window.location && window.location.pathname.replace(/\/+$/, '') === '/admin/login');
@@ -642,6 +643,12 @@ let state = {
   customerRegistration: null,
   portal: null,
   portalLoaded: false,
+  ownerPaymentSettings: { upiId: '', packPrices: {} },
+  ownerPaymentRequests: [],
+  customerPaymentRequests: [],
+  paymentReference: '',
+  paymentSettingsMessage: '',
+  paymentError: '',
   dataNotice: '',
   reportView: 'daily',
   reportDay: todayStr(),
@@ -879,6 +886,10 @@ function portalFor(c) {
     payments: (c.payments || []).filter(p => !p.deleted).map(function (p) {
       return { date: p.date || '', amount: Number(p.amount) || 0, note: p.note || '' };
     }),
+    paymentSettings: {
+      upiId: state.ownerPaymentSettings.upiId || '',
+      packPrices: Object.assign({}, state.ownerPaymentSettings.packPrices || {})
+    },
     balance: Math.max(0, Math.round(bal)),
     credit: Math.max(0, Math.round(-bal)),
     lowAt: LOW_SHAKES
@@ -1022,6 +1033,8 @@ function startOwnerSync() {
     return;
   }
   refreshPendingRegistrations(clubId);
+  refreshOwnerPaymentSettings(clubId);
+  refreshOwnerPaymentRequests(clubId);
   registrationChannel = supabaseClient.channel('club-registrations-' + clubId)
     .on('postgres_changes', {
       event: '*',
@@ -1029,6 +1042,14 @@ function startOwnerSync() {
       table: 'customer_registrations',
       filter: 'club_id=eq.' + clubId
     }, function () { refreshPendingRegistrations(clubId); })
+    .subscribe();
+  paymentRequestsChannel = supabaseClient.channel('club-payment-requests-' + clubId)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'pack_payment_requests',
+      filter: 'club_id=eq.' + clubId
+    }, function () { refreshOwnerPaymentRequests(clubId); })
     .subscribe();
   supabaseClient.from('club_ledgers').select('ledger').eq('club_id', clubId).maybeSingle()
     .then(function (result) {
@@ -1080,6 +1101,43 @@ function refreshPendingRegistrations(clubId) {
     });
 }
 
+function refreshOwnerPaymentSettings(clubId) {
+  if (!supabaseClient || !clubId) return;
+  supabaseClient.from('club_payment_settings').select('upi_id,pack_prices')
+    .eq('club_id', clubId).maybeSingle()
+    .then(function (result) {
+      if (result.error) throw result.error;
+      state.ownerPaymentSettings = {
+        upiId: result.data && result.data.upi_id || '',
+        packPrices: result.data && result.data.pack_prices || {}
+      };
+      render();
+    })
+    .catch(function (error) {
+      state.paymentError = error && error.message
+        ? 'Unable to load payment settings. Apply the latest Supabase migration. ' + error.message
+        : 'Unable to load payment settings. Apply the latest Supabase migration.';
+      render();
+    });
+}
+
+function refreshOwnerPaymentRequests(clubId) {
+  if (!supabaseClient || !clubId) return;
+  supabaseClient.from('pack_payment_requests').select('*')
+    .eq('club_id', clubId).order('created_at', { ascending: false }).limit(50)
+    .then(function (result) {
+      if (result.error) throw result.error;
+      state.ownerPaymentRequests = result.data || [];
+      render();
+    })
+    .catch(function (error) {
+      state.paymentError = error && error.message
+        ? 'Unable to load payment requests. Apply the latest Supabase migration. ' + error.message
+        : 'Unable to load payment requests. Apply the latest Supabase migration.';
+      render();
+    });
+}
+
 function stopOwnerSync() {
   if (supabaseChannel && supabaseClient) {
     try { supabaseClient.removeChannel(supabaseChannel); } catch (e) {}
@@ -1087,9 +1145,14 @@ function stopOwnerSync() {
   if (registrationChannel && supabaseClient) {
     try { supabaseClient.removeChannel(registrationChannel); } catch (e) {}
   }
+  if (paymentRequestsChannel && supabaseClient) {
+    try { supabaseClient.removeChannel(paymentRequestsChannel); } catch (e) {}
+  }
   supabaseChannel = null;
   registrationChannel = null;
+  paymentRequestsChannel = null;
   state.pendingRegistrations = [];
+  state.ownerPaymentRequests = [];
   portalPrimed = false;
   syncStatus = 'offline';
 }
@@ -1098,6 +1161,7 @@ function portalCacheKey(uid) { return 'clubLedgerPortal:' + uid; }
 function startPortalSync(uid) {
   stopPortalSync();
   state.portal = null;
+  state.customerPaymentRequests = [];
   state.portalLoaded = false;
   try {
     const raw = localStorage.getItem(portalCacheKey(uid));
@@ -1107,13 +1171,27 @@ function startPortalSync(uid) {
   const clubId = state.customerRegistration && state.customerRegistration.club_id;
   Promise.all([
     supabaseClient.from('customer_registrations').select('*').eq('user_uid', uid).maybeSingle(),
-    supabaseClient.from('customer_portals').select('portal').eq('customer_uid', uid).maybeSingle()
+    supabaseClient.from('customer_portals').select('portal').eq('customer_uid', uid).maybeSingle(),
+    supabaseClient.from('pack_payment_requests').select('*').eq('customer_uid', uid)
+      .order('created_at', { ascending: false }).limit(10),
+    clubId
+      ? supabaseClient.from('club_payment_settings').select('upi_id,pack_prices').eq('club_id', clubId).maybeSingle()
+      : Promise.resolve({ data: null, error: null })
   ]).then(function (results) {
-    const registration = results[0], portal = results[1];
+    const registration = results[0], portal = results[1], requests = results[2], settings = results[3];
     if (registration.error) throw registration.error;
     if (portal.error) throw portal.error;
+    if (requests.error) throw requests.error;
+    if (settings.error) throw settings.error;
     state.customerRegistration = registration.data || state.customerRegistration;
     state.portal = portal.data && portal.data.portal || null;
+    state.customerPaymentRequests = requests.data || [];
+    if (state.portal) {
+      state.portal.paymentSettings = {
+        upiId: settings.data && settings.data.upi_id || '',
+        packPrices: settings.data && settings.data.pack_prices || {}
+      };
+    }
     state.portalLoaded = true;
     state.portalError = false;
     try {
@@ -1141,6 +1219,27 @@ function startPortalSync(uid) {
       state.customerRegistration = payload.new || null;
       render();
     })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'pack_payment_requests', filter: 'customer_uid=eq.' + uid }, function () {
+      supabaseClient.from('pack_payment_requests').select('*').eq('customer_uid', uid)
+        .order('created_at', { ascending: false }).limit(10)
+        .then(function (result) {
+          if (result.error) throw result.error;
+          state.customerPaymentRequests = result.data || [];
+          render();
+        })
+        .catch(function (error) {
+          state.paymentError = error && error.message ? error.message : 'Unable to refresh payment notifications.';
+          render();
+        });
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'club_payment_settings', filter: 'club_id=eq.' + clubId }, function (payload) {
+      if (!state.portal) return;
+      state.portal.paymentSettings = {
+        upiId: payload.new && payload.new.upi_id || '',
+        packPrices: payload.new && payload.new.pack_prices || {}
+      };
+      render();
+    })
     .subscribe();
 }
 function stopPortalSync() {
@@ -1148,6 +1247,7 @@ function stopPortalSync() {
     try { supabaseClient.removeChannel(portalChannel); } catch (e) {}
   }
   portalChannel = null;
+  state.customerPaymentRequests = [];
 }
 
 /* ---------- Auth (email + password) ---------- */
@@ -1773,8 +1873,8 @@ function updateBoundFormControls() {
   switch (modal.type) {
     case 'approvalPack':
       action = 'saveApprovalPack';
-      valid = Boolean(f.packType && Number(f.totalShakes) > 0 &&
-        f.cost !== '' && Number(f.cost) >= 0 && !f.busy);
+      valid = Boolean(f.packType &&
+        Number(state.ownerPaymentSettings.packPrices[f.packType]) > 0 && !f.busy);
       break;
     case 'adminEditOwner':
       action = 'adminOwnerEdit';
@@ -1804,7 +1904,8 @@ function updateBoundFormControls() {
       break;
     case 'renew':
       action = 'saveRenew';
-      valid = f.totalShakes !== '' && Number(f.totalShakes) > 0 && f.cost !== '' && Number(f.cost) >= 0;
+      valid = Boolean(f.packType &&
+        Number(state.ownerPaymentSettings.packPrices[f.packType]) > 0 && !f.busy);
       break;
     case 'custLogin':
       action = 'saveCustLogin';
@@ -1970,11 +2071,18 @@ function reminderSent(c, type) {
 function doRemind(id, type) {
   const c = state.customers.find(x => x.id === id);
   if (!c) return;
-  const text = type === 'shakes' ? shakesMessage(c) : (type === 'expiry' ? expiryMessage(c) : balanceMessage(c));
+  const reminder = type === 'shakes' ? shakesMessage(c) : (type === 'expiry' ? expiryMessage(c) : balanceMessage(c));
+  const text = reminder + '\n\nI have also sent a payment notification to your Club Ledger app. Choose a pack there when you are ready.';
   const url = waLink(c.phone, text);
   c.reminders = c.reminders || {};
   c.reminders[type] = { key: reminderKey(c, type), ts: Date.now() };
   saveData();
+  createOwnerPackOffer(c, type).catch(function (error) {
+    state.paymentError = error && error.message
+      ? 'WhatsApp reminder opened, but the in-app payment notification could not be sent. ' + error.message
+      : 'WhatsApp reminder opened, but the in-app payment notification could not be sent.';
+    render();
+  });
   render();
   window.open(url, '_blank');
 }
@@ -2221,6 +2329,53 @@ function renderAdminCollectionDetails(startDate, endDate) {
   </div>`;
 }
 
+function adminSelectedPeriodRange(baseDate) {
+  const date = baseDate || todayStr();
+  const period = state.adminReportPeriod || 'daily';
+  if (period === 'weekly') {
+    return { start: addDays(date, -6), end: date };
+  }
+  if (period === 'monthly') {
+    return { start: date.slice(0, 7) + '-01', end: date };
+  }
+  return { start: date, end: date };
+}
+
+function renderAdminPeriodControls() {
+  const period = state.adminReportPeriod || 'daily';
+  return `<div class="chips" aria-label="Report time period">${[
+    ['daily', 'Daily'],
+    ['weekly', 'Weekly'],
+    ['monthly', 'Monthly']
+  ].map(function (entry) {
+    return `<button class="chip ${period === entry[0] ? 'active' : ''}" data-action="setAdminReportPeriod" data-value="${entry[0]}" aria-pressed="${period === entry[0]}">${entry[1]}</button>`;
+  }).join('')}</div>`;
+}
+
+function renderAdminPeriodClubChart(metric, title) {
+  const range = adminSelectedPeriodRange();
+  const clubs = adminSelectedClubs();
+  const items = clubs.map(function (club) {
+    let value = 0;
+    if (metric === 'collections') {
+      value = adminCollectionInRange(club, range.start, range.end);
+    } else if (metric === 'customers') {
+      value = adminClubCustomers(club).filter(function (customer) {
+        const joined = String(customer.joinDate || '').slice(0, 10);
+        return joined >= range.start && joined <= range.end;
+      }).length;
+    } else if (metric === 'orders') {
+      value = adminClubOrders(club).filter(function (order) {
+        return order.date >= range.start && order.date <= range.end;
+      }).length;
+    } else if (metric === 'attendance') {
+      value = adminVisitsInRange(club, range.start, range.end);
+    }
+    return { label: club.name, value: value };
+  });
+  return renderAdminBarChart(title, items, metric === 'collections');
+}
+
 function renderAdminClubChart(metric) {
   const clubs = adminSelectedClubs();
   if (metric === 'collections') {
@@ -2258,42 +2413,56 @@ function renderAdminClubChart(metric) {
 }
 
 function renderAdminCustomers() {
-  const customers = activeCustomers();
-  return `${renderAdminClubChart('customers')}<div class="card">
-    <h3 class="section-title">Customers across registered clubs (${customers.length})</h3>
+  const range = adminSelectedPeriodRange();
+  const customers = activeCustomers().filter(function (customer) {
+    const joined = String(customer.joinDate || '').slice(0, 10);
+    return joined >= range.start && joined <= range.end;
+  });
+  return `${renderAdminPeriodControls()}
+    ${renderAdminPeriodClubChart('customers', 'Customers joined by club · ' + (state.adminReportPeriod || 'daily'))}
+    <div class="card">
+    <h3 class="section-title">Customers joined in this period (${customers.length})</h3>
     ${customers.length ? customers.map(function (customer) {
       return `<div class="report-row">
         <div><p class="name">${escapeHtml(reportCustomerLabel(customer))}</p><p class="meta">${escapeHtml(customer.phone || 'No mobile')} · ${customer.visits.length} visits</p></div>
         <p class="amt">${formatCurrency(Math.max(0, balanceOf(customer)))} due</p>
       </div>`;
-    }).join('') : '<p class="empty-state-text">No customers in this club selection.</p>'}
+    }).join('') : '<p class="empty-state-text">No customers joined during this period.</p>'}
   </div>`;
 }
 
 function renderAdminOrders() {
-  const orders = activeOrders();
-  return `${renderAdminClubChart('orders')}<div class="card">
-    <h3 class="section-title">Orders across registered clubs (${orders.length})</h3>
+  const range = adminSelectedPeriodRange();
+  const orders = activeOrders().filter(function (order) {
+    return order.date >= range.start && order.date <= range.end;
+  });
+  return `${renderAdminPeriodControls()}
+    ${renderAdminPeriodClubChart('orders', 'Orders by club · ' + (state.adminReportPeriod || 'daily'))}
+    <div class="card">
+    <h3 class="section-title">Orders in this period (${orders.length})</h3>
     ${orders.length ? orders.map(function (order) {
       return `<div class="report-row">
         <div><p class="name">${escapeHtml(reportOrderCustomerLabel(order))}</p><p class="meta">${escapeHtml(order.date)} · ${order.items.filter(item => !item.deleted).length} items</p></div>
         <p class="amt">${formatCurrency(Math.max(0, orderBalance(order)))} due</p>
       </div>`;
-    }).join('') : '<p class="empty-state-text">No orders in this club selection.</p>'}
+    }).join('') : '<p class="empty-state-text">No orders during this period.</p>'}
   </div>`;
 }
 
 function renderAdminAttendance() {
   const date = state.attendanceDate;
+  const range = adminSelectedPeriodRange(date);
   const customers = activeCustomers();
   const visitors = customers.filter(function (customer) { return attendanceCount(customer, date) > 0; });
   const shakes = visitors.reduce((sum, customer) => sum + attendanceCount(customer, date), 0);
-  const days = Array.from({ length: 7 }, (_, index) => addDays(todayStr(), index - 6));
+  const days = [];
+  for (let day = range.start; day <= range.end; day = addDays(day, 1)) days.push(day);
   const bars = days.map(function (day) {
     return `<div class="report-row"><p class="name">${formatDateShort(day)}</p><p class="amt">${customers.reduce((sum, customer) => sum + attendanceCount(customer, day), 0)} visits</p></div>`;
   }).join('');
   return `
-    ${renderAdminClubChart('attendance')}
+    ${renderAdminPeriodControls()}
+    ${renderAdminPeriodClubChart('attendance', 'Attendance by club · ' + (state.adminReportPeriod || 'daily'))}
     <div class="card">
       <div class="date-nav">
         <button data-action="navDate" data-delta="-1">${ICONS.arrowLeft}</button>
@@ -2302,7 +2471,7 @@ function renderAdminAttendance() {
       </div>
       <p class="attendance-count"><span class="num">${visitors.length}</span><span class="label">${shakes} shakes served · ${customers.length} customers</span></p>
     </div>
-    <div class="card"><h3 class="section-title">Last 7 days · daily visits</h3>${bars}</div>
+    <div class="card"><h3 class="section-title">Attendance · ${formatDateLong(range.start)}${range.start !== range.end ? ' – ' + formatDateLong(range.end) : ''}</h3>${bars || '<p class="empty-state-text">No days in this period.</p>'}</div>
     <div class="card">
       <h3 class="section-title">Attendance · ${formatDateShort(date)}</h3>
       ${visitors.length ? visitors.map(function (customer) {
@@ -2325,14 +2494,7 @@ function renderAdminReports() {
   const period = state.adminReportPeriod || 'daily';
   const ranges = adminReportRanges(period);
   const selectedClubs = adminSelectedClubs();
-  const periodButtons = [
-    ['daily', 'Daily'],
-    ['weekly', 'Weekly'],
-    ['monthly', 'Monthly']
-  ];
-  const controls = `<div class="chips">${periodButtons.map(function (entry) {
-    return `<button class="chip ${period === entry[0] ? 'active' : ''}" data-action="setAdminReportPeriod" data-value="${entry[0]}">${entry[1]}</button>`;
-  }).join('')}</div>`;
+  const controls = renderAdminPeriodControls();
 
   if (state.adminForm.clubFilter === 'all') {
     const range = period === 'daily'
@@ -2728,6 +2890,8 @@ function renderAdminClubs() {
   const history = requests.filter(function (entry) { return entry.status !== 'pending'; });
   const clubs = state.adminClubs;
   return `
+    ${renderAdminPeriodControls()}
+    ${renderAdminPeriodClubChart('collections', 'Collections by club · ' + (state.adminReportPeriod || 'daily'))}
     <div class="card">
       <h3 class="section-title">Registered clubs (${clubs.length})</h3>
       ${clubs.length ? clubs.map(function (club) {
@@ -3029,6 +3193,7 @@ function renderPortalCard(p) {
     calendarCells.push(`<span class="calendar-day ${marked ? 'visited' : ''}">${day}${marked ? '<i>' + marked + '</i>' : ''}</span>`);
   }
   return `
+    ${renderCustomerPaymentNotifications(p)}
     ${alertsHtml}
     <div class="portal-hero">
       <p class="portal-name">${escapeHtml(p.name)}</p>
@@ -3060,13 +3225,293 @@ function renderPortalCard(p) {
   `;
 }
 
+function upiPaymentLink(request) {
+  const params = new URLSearchParams({
+    pa: request.upi_id,
+    pn: currentClubName(),
+    am: Number(request.amount).toFixed(2),
+    cu: 'INR',
+    tn: 'Club Ledger ' + request.id
+  });
+  return 'upi://pay?' + params.toString();
+}
+
+function renderCustomerPaymentNotifications(portal) {
+  const active = state.customerPaymentRequests.find(function (request) {
+    return ['offered', 'pending', 'payment_submitted'].includes(request.status);
+  });
+  const settings = portal.paymentSettings || {};
+  const priceList = settings.packPrices || {};
+  const availablePacks = CONFIG.packTypes.filter(function (pack) {
+    return Number(priceList[pack.id]) > 0;
+  });
+  const requestCard = active
+    ? active.status === 'offered'
+      ? `<p class="modal-sub">Your club sent a payment reminder. Choose a pack to continue.</p>
+        <div class="payment-pack-options">${availablePacks.map(function (pack) {
+          return `<button class="menu-btn" data-action="requestCustomerPack" data-value="${escapeHtml(pack.id)}" data-id="${escapeHtml(active.id)}">${escapeHtml(pack.label)} · ${Number(pack.totalShakes)} shakes · ${formatCurrency(priceList[pack.id])}</button>`;
+        }).join('') || '<p class="empty-state-text">Pack prices are not available yet. Contact your club.</p>'}
+        <button class="cancel" data-action="declinePackPayment" data-id="${escapeHtml(active.id)}">Decline</button>`
+      : active.status === 'pending'
+        ? `<p class="modal-sub">${escapeHtml(active.pack_type)} · ${Number(active.total_shakes)} shakes · ${formatCurrency(active.amount)}</p>
+          <p>Pay ${formatCurrency(active.amount)} to <strong>${escapeHtml(active.upi_id)}</strong>. Your pack activates only after the owner verifies payment.</p>
+          <a class="btn-save" href="${escapeHtml(upiPaymentLink(active))}">Pay now with UPI</a>
+          <p class="field-hint">Your phone may ask which UPI app to use. If no app opens, copy the details into your UPI app. Never share your UPI PIN.</p>
+          <button class="link-btn" data-action="copyPaymentDetails" data-id="${escapeHtml(active.id)}">Copy UPI ID and amount</button>
+          <div class="field"><label for="payment-reference">UPI transaction ID / UTR</label>
+            <input id="payment-reference" type="text" autocomplete="off" data-bind="paymentReference" value="${escapeHtml(state.paymentReference || '')}" placeholder="Enter UTR after paying"></div>
+          <button class="btn-save" data-action="submitPackPayment" data-id="${escapeHtml(active.id)}">I have paid</button>
+          <button class="cancel" data-action="declinePackPayment" data-id="${escapeHtml(active.id)}">Decline request</button>`
+        : `<p class="modal-sub">Payment reference submitted: ${escapeHtml(active.utr || '')}. The owner will verify it before activating your pack.</p>`
+    : `<p class="modal-sub">Choose a pack to request. It will activate after the owner confirms the payment.</p>
+      <div class="payment-pack-options">${availablePacks.map(function (pack) {
+        return `<button class="menu-btn" data-action="requestCustomerPack" data-value="${escapeHtml(pack.id)}">${escapeHtml(pack.label)} · ${Number(pack.totalShakes)} shakes · ${formatCurrency(priceList[pack.id])}</button>`;
+      }).join('') || '<p class="empty-state-text">Your club has not set pack prices yet.</p>'}</div>`;
+  const pastRequests = state.customerPaymentRequests.filter(function (request) {
+    return ['confirmed', 'declined', 'rejected'].includes(request.status);
+  }).slice(0, 3);
+  if (!active && !availablePacks.length && !pastRequests.length && !state.paymentError) return '';
+  return `<div class="card payment-notification" role="status">
+    <h3 class="section-title">${active ? 'Payment notification' : 'Renew or choose a pack'}</h3>
+    ${state.paymentError ? `<div class="auth-error" role="alert">${escapeHtml(state.paymentError)}</div>` : ''}
+    ${state.paymentSettingsMessage ? `<div class="alert-banner ok" role="status">${escapeHtml(state.paymentSettingsMessage)}</div>` : ''}
+    ${requestCard}
+    ${pastRequests.map(function (request) {
+      const label = request.status === 'confirmed'
+        ? 'Payment verified; pack activated'
+        : request.status === 'declined' ? 'Payment request declined' : 'Payment needs follow-up with your club';
+      return `<p class="field-hint">${escapeHtml(label)}${request.amount > 0 ? ' · ' + formatCurrency(request.amount) : ''}</p>`;
+    }).join('')}
+  </div>`;
+}
+
+function saveOwnerPaymentSettings() {
+  const form = state.ownerPaymentSettings || { upiId: '', packPrices: {} };
+  const upiId = String(form.upiId || '').trim();
+  const prices = {};
+  const invalidPrice = CONFIG.packTypes.some(function (pack) {
+    const raw = form.packPrices && form.packPrices[pack.id];
+    if (raw === '' || raw == null) return false;
+    const price = Number(raw);
+    if (!Number.isFinite(price) || !Number.isInteger(price) || price < 0 || price > 10000000) return true;
+    if (price > 0) prices[pack.id] = price;
+    return false;
+  });
+  if (!/^[A-Za-z0-9._-]{2,256}@[A-Za-z0-9.-]{2,64}$/.test(upiId)) {
+    state.paymentError = 'Enter a valid UPI ID such as name@bank.';
+    render();
+    return;
+  }
+  if (invalidPrice || !Object.keys(prices).length) {
+    state.paymentError = 'Enter a valid price for at least one pack.';
+    render();
+    return;
+  }
+  const clubId = state.session.profile && state.session.profile.clubId;
+  if (!supabaseClient || !clubId) {
+    state.paymentError = 'Payment settings need an active owner account and internet connection.';
+    render();
+    return;
+  }
+  state.paymentError = '';
+  state.paymentSettingsMessage = '';
+  supabaseClient.from('club_payment_settings').upsert({
+    club_id: clubId,
+    upi_id: upiId,
+    pack_prices: prices,
+    updated_at: Date.now()
+  }, { onConflict: 'club_id' }).then(function (result) {
+    if (result.error) throw result.error;
+    state.ownerPaymentSettings = { upiId: upiId, packPrices: prices };
+    return true;
+  }).then(function () {
+    state.paymentSettingsMessage = 'Payment settings saved. Customers will see your UPI ID and pack prices in their app.';
+    render();
+  }).catch(function (error) {
+    state.paymentError = error && error.message
+      ? 'Unable to save payment settings. Apply the latest Supabase migration. ' + error.message
+      : 'Unable to save payment settings. Apply the latest Supabase migration.';
+    render();
+  });
+}
+
+function requestCustomerPack(packType, offeredRequestId) {
+  if (!supabaseClient) {
+    state.paymentError = 'Connect to the internet to request a pack.';
+    render();
+    return;
+  }
+  state.paymentError = '';
+  supabaseClient.rpc('create_customer_pack_request', {
+    request_id: offeredRequestId || uid(),
+    target_pack_type: packType
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    return supabaseClient.from('pack_payment_requests').select('*')
+      .eq('customer_uid', state.session.uid)
+      .order('created_at', { ascending: false }).limit(10);
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    state.customerPaymentRequests = result.data || [];
+    state.paymentReference = '';
+    render();
+  }).catch(function (error) {
+    state.paymentError = error && error.message ? error.message : 'Unable to request this pack.';
+    render();
+  });
+}
+
+function submitCustomerPackPayment(requestId) {
+  if (!supabaseClient) {
+    state.paymentError = 'Connect to the internet to submit the payment reference.';
+    render();
+    return;
+  }
+  const reference = String(state.paymentReference || '').trim();
+  if (reference.length < 6 || reference.length > 80) {
+    state.paymentError = 'Enter the UPI transaction ID / UTR (6–80 characters) after paying.';
+    render();
+    return;
+  }
+  supabaseClient.rpc('submit_customer_pack_payment', {
+    request_id: requestId,
+    payment_reference: reference
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    state.paymentReference = '';
+    return supabaseClient.from('pack_payment_requests').select('*')
+      .eq('customer_uid', state.session.uid)
+      .order('created_at', { ascending: false }).limit(10);
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    state.customerPaymentRequests = result.data || [];
+    state.paymentError = '';
+    render();
+  }).catch(function (error) {
+    state.paymentError = error && error.message ? error.message : 'Unable to submit payment reference.';
+    render();
+  });
+}
+
+function declineCustomerPackPayment(requestId) {
+  if (!supabaseClient) {
+    state.paymentError = 'Connect to the internet to decline this request.';
+    render();
+    return;
+  }
+  supabaseClient.rpc('decline_customer_pack_request', { request_id: requestId })
+    .then(function (result) {
+      if (result.error) throw result.error;
+      return supabaseClient.from('pack_payment_requests').select('*')
+        .eq('customer_uid', state.session.uid)
+        .order('created_at', { ascending: false }).limit(10);
+    }).then(function (result) {
+      if (result.error) throw result.error;
+      state.customerPaymentRequests = result.data || [];
+      state.paymentError = '';
+      render();
+    }).catch(function (error) {
+      state.paymentError = error && error.message ? error.message : 'Unable to decline this payment request.';
+      render();
+    });
+}
+
+function reviewCustomerPackPayment(requestId, approve) {
+  if (!supabaseClient) {
+    state.paymentError = 'Connect to the internet to review this payment.';
+    render();
+    return;
+  }
+  const request = state.ownerPaymentRequests.find(function (entry) { return entry.id === requestId; });
+  if (approve && !confirm('Only confirm if you checked that the amount reached your UPI/bank account. Confirm ' +
+      formatCurrency(request && request.amount) + ' and activate this pack now?')) return;
+  state.paymentError = '';
+  supabaseClient.rpc('review_customer_pack_payment', {
+    request_id: requestId,
+    approve_payment: approve
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    const clubId = state.session.profile && state.session.profile.clubId;
+    return supabaseClient.from('club_ledgers').select('ledger').eq('club_id', clubId).single();
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    const remoteLedger = result.data.ledger || {};
+    state.customers = mergeRecords(state.customers, (remoteLedger.customers || []).map(migrateCustomer), migrateCustomer);
+    state.orders = mergeRecords(state.orders, (remoteLedger.orders || []).map(migrateOrder), migrateOrder);
+    state.lastModified = Math.max(state.lastModified, Number(remoteLedger.lastModified) || 0);
+    if (!persistData()) throw new Error(state.storageError || 'Unable to save the confirmed pack to this device.');
+    state.customers.forEach(function (customer) {
+      if (customer.login && customer.login.uid) delete portalSig[customer.login.uid];
+    });
+    refreshOwnerPaymentRequests(state.session.profile.clubId);
+    return pushToCloud();
+  }).then(function (synced) {
+    state.paymentSettingsMessage = approve
+      ? (synced
+        ? 'Payment confirmed and the pack is active.'
+        : 'Payment is confirmed in the cloud, but the customer card could not be refreshed. Reconnect and refresh club data.')
+      : 'Payment reference rejected. The customer will see the update.';
+    render();
+  }).catch(function (error) {
+    state.paymentError = error && error.message ? error.message : 'Unable to review this payment.';
+    render();
+  });
+}
+
+function createOwnerPackOffer(customer, reminderType) {
+  if (!supabaseClient || !customer || !customer.id) {
+    return Promise.reject(new Error('Payment notifications require an online linked customer account.'));
+  }
+  return supabaseClient.rpc('create_owner_pack_offer', {
+    request_id: uid(),
+    target_customer_id: customer.id,
+    target_reminder_type: reminderType || ''
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    refreshOwnerPaymentRequests(state.session.profile.clubId);
+  });
+}
+
+function createOwnerPackRequest(customerId, packType) {
+  if (!supabaseClient) return Promise.reject(new Error('Connect to the internet to send a pack payment request.'));
+  return supabaseClient.rpc('create_owner_pack_request', {
+    request_id: uid(),
+    target_customer_id: customerId,
+    target_pack_type: packType
+  }).then(function (result) {
+    if (result.error) throw result.error;
+    refreshOwnerPaymentRequests(state.session.profile.clubId);
+    return result.data;
+  });
+}
+
+function copyCustomerPaymentDetails(requestId) {
+  const request = state.customerPaymentRequests.find(function (entry) {
+    return entry.id === requestId && entry.status === 'pending';
+  });
+  if (!request) return;
+  const details = 'UPI ID: ' + request.upi_id + '\nAmount: ₹' + Number(request.amount).toFixed(2);
+  const copyPromise = navigator.clipboard && navigator.clipboard.writeText
+    ? navigator.clipboard.writeText(details)
+    : Promise.reject(new Error('Clipboard access is unavailable in this browser. Select and copy the UPI ID and amount shown above.'));
+  copyPromise.then(function () {
+    state.paymentError = '';
+    state.paymentSettingsMessage = 'UPI ID and amount copied.';
+    render();
+  }).catch(function (error) {
+    state.paymentError = error && error.message ? error.message : 'Unable to copy payment details.';
+    render();
+  });
+}
+
 function renderNav() {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: ICONS.dashboard },
     { id: 'customers', label: 'Customers', icon: ICONS.users },
     { id: 'orders', label: 'Orders', icon: ICONS.bag },
     { id: 'attendance', label: 'Attendance', icon: ICONS.calendar },
-    { id: 'reports', label: 'Reports', icon: ICONS.barChart }
+    { id: 'reports', label: 'Reports', icon: ICONS.barChart },
+    { id: 'settings', label: 'Settings', icon: ICONS.user }
   ];
   return `<nav class="nav">${tabs.map(t => `
     <button class="${state.tab === t.id ? 'active' : ''}" data-action="setTab" data-value="${t.id}">
@@ -3081,7 +3526,57 @@ function renderTab(totals) {
   if (state.tab === 'customers') return renderCustomers();
   if (state.tab === 'orders') return renderOrders();
   if (state.tab === 'reports') return renderReports();
+  if (state.tab === 'settings') return renderOwnerPaymentSettings();
   return renderAttendance();
+}
+
+function renderOwnerPaymentRequests() {
+  const requests = state.ownerPaymentRequests.filter(function (request) {
+    return ['offered', 'pending', 'payment_submitted'].includes(request.status);
+  });
+  if (!requests.length && !state.paymentError && !state.paymentSettingsMessage) return '';
+  return `<div class="card">
+    <h3 class="section-title">Customer payment requests (${requests.length})</h3>
+    ${state.paymentError ? `<div class="auth-error" role="alert">${escapeHtml(state.paymentError)}</div>` : ''}
+    ${state.paymentSettingsMessage ? `<div class="alert-banner ok" role="status">${escapeHtml(state.paymentSettingsMessage)}</div>` : ''}
+    ${requests.map(function (request) {
+      const customer = state.customers.find(function (entry) { return entry.id === request.customer_id; });
+      const status = request.status === 'payment_submitted'
+        ? 'Payment reference submitted: ' + request.utr
+        : request.status === 'offered' ? 'Payment reminder sent; customer must choose a pack' : 'Waiting for customer payment';
+      const whatsAppText = 'Hi ' + (customer ? customer.name : '') + ', your Club Ledger payment request is ' +
+        (request.status === 'offered' ? 'ready. Open the app and choose a pack.' :
+          'for ' + formatCurrency(request.amount) + ' (' + request.pack_type + '). Open the app to pay by UPI and submit the transaction reference.') +
+        ' Your pack activates after the club verifies payment.';
+      return `<div class="report-row">
+        <div><p class="name">${escapeHtml(customer ? customer.name : 'Customer')} · ${escapeHtml(request.pack_type || 'Pack selection')}</p>
+          <p class="meta">${escapeHtml(status)}${request.amount > 0 ? ' · ' + formatCurrency(request.amount) : ''}</p>
+        </div>
+        <span class="row-actions">
+          ${customer && customer.phone ? `<a class="btn-remind" href="${escapeHtml(waLink(customer.phone, whatsAppText))}" target="_blank" rel="noopener noreferrer">WhatsApp</a>` : ''}
+          ${request.status === 'payment_submitted' ? `<button class="btn-primary-sm" data-action="confirmPackPayment" data-id="${escapeHtml(request.id)}">Confirm &amp; activate</button>
+            <button class="cancel" data-action="rejectPackPayment" data-id="${escapeHtml(request.id)}">Reject</button>` : ''}
+        </span>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderOwnerPaymentSettings() {
+  const settings = state.ownerPaymentSettings || { upiId: '', packPrices: {} };
+  return `<div class="card">
+    <h2 class="section-title">Payment settings</h2>
+    <p class="modal-sub">Add your UPI ID and set the customer price for each pack. Customers can request a pack in their app; only your confirmation after checking the bank/UPI receipt activates it.</p>
+    ${state.paymentSettingsMessage ? `<div class="alert-banner ok" role="status">${escapeHtml(state.paymentSettingsMessage)}</div>` : ''}
+    <div class="field"><label for="owner-upi-id">Owner UPI ID</label>
+      <input id="owner-upi-id" type="text" inputmode="email" autocomplete="off" data-bind="ownerPaymentSettings.upiId" value="${escapeHtml(settings.upiId || '')}" placeholder="name@bank"></div>
+    ${CONFIG.packTypes.map(function (pack) {
+      return `<div class="field"><label for="owner-pack-price-${escapeHtml(pack.id)}">${escapeHtml(pack.label)} · ${Number(pack.totalShakes) || 0} shakes (₹)</label>
+        <input id="owner-pack-price-${escapeHtml(pack.id)}" type="number" min="1" step="1" inputmode="numeric" data-bind="ownerPaymentSettings.packPrices.${pack.id}" value="${escapeHtml(settings.packPrices && settings.packPrices[pack.id] || '')}" placeholder="Enter customer price"></div>`;
+    }).join('')}
+    <button class="btn-save" data-action="saveOwnerPaymentSettings">Save payment settings</button>
+  </div>
+  ${renderOwnerPaymentRequests()}`;
 }
 
 function renderDashboard(totals) {
@@ -3089,6 +3584,7 @@ function renderDashboard(totals) {
   const rate = total > 0 ? Math.round((totals.totalCollected / total) * 100) : 0;
 
   return `
+    ${renderOwnerPaymentRequests()}
     ${state.pendingRegistrations.length ? `<div class="card">
       <h3 class="section-title">Customer registrations awaiting approval</h3>
       ${state.pendingRegistrations.map(function (registration) {
@@ -4002,36 +4498,28 @@ function renderApprovalPackModal(m) {
   const customer = state.customers.find(function (entry) { return entry.id === m.id && !entry.deleted; });
   if (!customer) return '';
   const f = state.modalForm || {};
-  const valid = f.packType && Number(f.totalShakes) > 0 &&
-    f.cost !== '' && Number(f.cost) >= 0 && !f.busy;
+  const prices = state.ownerPaymentSettings.packPrices || {};
+  const price = Number(prices[f.packType]) || 0;
+  const valid = Boolean(f.packType && price > 0 && !f.busy);
   return `
     <div class="modal-overlay">
       <div class="modal-card">
         <div class="modal-head"><h2>Choose customer pack</h2><button data-action="closeApprovalPack">${ICONS.x}</button></div>
-        <p class="modal-sub">${escapeHtml(customer.name)} is approved and linked. Choose their first pack to finish setup.</p>
+        <p class="modal-sub">${escapeHtml(customer.name)} is approved and linked. Choose a priced pack to send a payment request. The pack activates only after you verify the payment.</p>
         ${f.error ? `<div class="auth-error" role="alert">${escapeHtml(f.error)}</div>` : ''}
         <div class="field"><label>Pack type *</label>
           <select data-pack-type-select>
             <option value="" ${!f.packType ? 'selected' : ''}>Choose a pack</option>
-            ${CONFIG.packTypes.map(function (type) {
-              return `<option value="${escapeHtml(type.id)}" ${f.packType === type.id ? 'selected' : ''}>${escapeHtml(type.label)}${type.id === 'custom' ? '' : ' (' + type.totalShakes + ' shakes)'}</option>`;
+            ${CONFIG.packTypes.filter(function (type) {
+              return Number(prices[type.id]) > 0;
+            }).map(function (type) {
+              return `<option value="${escapeHtml(type.id)}" ${f.packType === type.id ? 'selected' : ''}>${escapeHtml(type.label)} · ${Number(type.totalShakes)} shakes · ${formatCurrency(prices[type.id])}</option>`;
             }).join('')}
           </select>
         </div>
-        <div class="field"><label>Pack size (shakes) *</label>
-          ${shakeQuickChips('modalForm.totalShakes')}
-          <input type="number" inputmode="numeric" data-bind="modalForm.totalShakes" value="${escapeHtml(f.totalShakes || '')}" placeholder="Choose a pack type">
-        </div>
-        <div class="field"><label>Pack cost (₹) *</label>
-          <input type="number" inputmode="decimal" data-bind="modalForm.cost" value="${escapeHtml(f.cost || '')}" placeholder="Enter pack cost">
-        </div>
-        <div class="field"><label>Pack start date</label>
-          <input type="date" data-bind="modalForm.startDate" value="${escapeHtml(f.startDate || todayStr())}">
-        </div>
-        <div class="field"><label>Payment received now (optional)</label>
-          <input type="number" inputmode="decimal" data-bind="modalForm.initialPayment" value="${escapeHtml(f.initialPayment || '')}" placeholder="0">
-        </div>
-        <button class="btn-save" data-action="saveApprovalPack" ${valid ? '' : 'disabled'}>${f.busy ? 'Saving pack…' : 'Save pack and finish approval'}</button>
+        ${f.packType && price > 0 ? `<p class="field-hint">Customer price: ${formatCurrency(price)} · ${Number(packType(f.packType).totalShakes)} shakes</p>` : ''}
+        ${!Object.keys(prices).length ? '<p class="field-hint">Set your UPI ID and pack prices in Settings before requesting payment.</p>' : ''}
+        <button class="btn-save" data-action="saveApprovalPack" ${valid ? '' : 'disabled'}>${f.busy ? 'Sending request…' : 'Send payment request'}</button>
         <button class="link-btn" data-action="closeApprovalPack" ${f.busy ? 'disabled' : ''}>Finish later</button>
       </div>
     </div>
@@ -4160,25 +4648,25 @@ function renderRenewModal(m) {
   const f = state.modalForm;
   const idx = currentPackIndex(c);
   const remaining = idx >= 0 ? packShakesRemaining(c, idx) : 0;
-  const valid = f.totalShakes !== '' && Number(f.totalShakes) > 0 && f.cost !== '' && Number(f.cost) >= 0;
+  const prices = state.ownerPaymentSettings.packPrices || {};
+  const price = Number(prices[f.packType]) || 0;
+  const valid = Boolean(f.packType && price > 0 && !f.busy);
   return `
     <div class="modal-overlay">
       <div class="modal-card">
         <div class="modal-head"><h2>Renew pack</h2><button data-action="closeModal">${ICONS.x}</button></div>
         <p class="modal-sub">${escapeHtml(c.name)} · ${remaining === 0 ? 'current pack finished' : remaining + ' shake' + (remaining === 1 ? '' : 's') + ' left in current pack'}</p>
 
-        <div class="field"><label>Pack type</label><select data-pack-type-select><option value="custom" ${f.packType === 'custom' ? 'selected' : ''}>Custom</option>${CONFIG.packTypes.filter(t => t.id !== 'custom').map(t => `<option value="${t.id}" ${f.packType === t.id ? 'selected' : ''}>${escapeHtml(t.label)} (${t.totalShakes} shakes)</option>`).join('')}</select></div>
-        <div class="field">
-          <label>New pack size (shakes) *</label>
-          ${shakeQuickChips('modalForm.totalShakes')}
-          <input id="f-rshakes" type="number" inputmode="numeric" data-bind="modalForm.totalShakes" value="${escapeHtml(f.totalShakes)}" placeholder="e.g. 30">
-        </div>
-
-        <div class="field"><label>New pack cost (₹) *</label><input id="f-rcost" type="number" inputmode="decimal" data-bind="modalForm.cost" value="${escapeHtml(f.cost)}" placeholder="e.g. 7500"></div>
-        <div class="field"><label>Start date</label><input id="f-rstart" type="date" data-bind="modalForm.startDate" value="${f.startDate}"></div>
-        <div class="field"><label>Payment now (optional)</label><input id="f-rpay" type="number" inputmode="decimal" data-bind="modalForm.initialPayment" value="${escapeHtml(f.initialPayment)}" placeholder="0"></div>
-
-        <button class="btn-save" data-action="saveRenew" ${valid ? '' : 'disabled'}>Start new pack</button>
+        <div class="field"><label>Pack type</label><select data-pack-type-select><option value="" ${!f.packType ? 'selected' : ''}>Choose a pack</option>${CONFIG.packTypes.filter(function (type) {
+          return Number(prices[type.id]) > 0;
+        }).map(function (type) {
+          return `<option value="${escapeHtml(type.id)}" ${f.packType === type.id ? 'selected' : ''}>${escapeHtml(type.label)} · ${Number(type.totalShakes)} shakes · ${formatCurrency(prices[type.id])}</option>`;
+        }).join('')}</select></div>
+        ${f.packType && price > 0
+          ? `<p class="field-hint">Customer price: ${formatCurrency(price)}. The new pack activates after you verify the UPI payment.</p>`
+          : '<p class="field-hint">Set pack prices in Settings before sending a payment request.</p>'}
+        ${f.error ? `<div class="auth-error" role="alert">${escapeHtml(f.error)}</div>` : ''}
+        <button class="btn-save" data-action="saveRenew" ${valid ? '' : 'disabled'}>${f.busy ? 'Sending request…' : 'Send pack payment request'}</button>
       </div>
     </div>
   `;
@@ -4540,6 +5028,27 @@ function handleAction(action, target) {
       state.expandedId = null;
       state.removePayment = null;
       render();
+      break;
+    case 'saveOwnerPaymentSettings':
+      saveOwnerPaymentSettings();
+      break;
+    case 'confirmPackPayment':
+      reviewCustomerPackPayment(id, true);
+      break;
+    case 'rejectPackPayment':
+      reviewCustomerPackPayment(id, false);
+      break;
+    case 'requestCustomerPack':
+      requestCustomerPack(target.dataset.value, id || '');
+      break;
+    case 'submitPackPayment':
+      submitCustomerPackPayment(id);
+      break;
+    case 'declinePackPayment':
+      declineCustomerPackPayment(id);
+      break;
+    case 'copyPaymentDetails':
+      copyCustomerPaymentDetails(id);
       break;
     case 'openAttendance':
       state.tab = 'attendance';
@@ -4975,60 +5484,26 @@ function doSaveApprovalPack() {
     return entry.id === customerId && !entry.deleted;
   });
   if (!form || !customer || form.busy) return;
-  const totalShakes = Number(form.totalShakes);
-  const cost = Number(form.cost);
-  const initialPayment = Number(form.initialPayment || 0);
-  if (!form.packType || !Number.isFinite(totalShakes) || totalShakes <= 0 ||
-      !Number.isFinite(cost) || cost < 0 ||
-      !Number.isFinite(initialPayment) || initialPayment < 0) {
-    form.error = 'Choose a pack and enter a valid pack size and cost.';
+  if (!form.packType || !(Number(state.ownerPaymentSettings.packPrices[form.packType]) > 0)) {
+    form.error = 'Choose a pack with a price configured in Settings.';
     render();
     return;
   }
   form.busy = true;
   form.error = '';
-  form.packId = form.packId || uid();
-  form.paymentId = form.paymentId || uid();
-  const startDate = form.startDate || todayStr();
-  customer.packs = customer.packs || [];
-  if (!customer.packs.some(function (pack) { return pack.id === form.packId; })) {
-    customer.packs.push({
-      id: form.packId,
-      packType: form.packType,
-      totalShakes: totalShakes,
-      usedOffset: 0,
-      cost: cost,
-      startDate: startDate,
-      expiryDate: packExpiryDate(form.packType, startDate),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      deleted: false
-    });
-  }
-  customer.registrationOnly = false;
-  if (initialPayment > 0 && !(customer.payments || []).some(function (payment) {
-    return payment.id === form.paymentId;
-  })) {
-    customer.payments = customer.payments || [];
-    customer.payments.push({
-      id: form.paymentId,
-      amount: initialPayment,
-      date: startDate,
-      note: 'Initial pack payment',
-      ts: Date.now()
-    });
-  }
-  form.busy = false;
-  saveData().then(function (synced) {
-    if (!synced) {
-      form.error = 'The pack is saved locally, but cloud sync failed. Check the connection and retry.';
-      render();
-      return;
-    }
+  createOwnerPackRequest(customer.id, form.packType).then(function () {
+    state.paymentSettingsMessage = 'Payment request sent. The pack will be activated after you confirm the customer’s UPI payment.';
+    state.paymentError = '';
     state.modal = null;
     state.modalForm = null;
-    state.tab = 'customers';
-    state.expandedId = customer.id;
+    state.tab = 'dashboard';
+    render();
+  }).catch(function (error) {
+    if (state.modalForm !== form) return;
+    form.busy = false;
+    form.error = error && error.message
+      ? 'Unable to send pack payment request. ' + error.message
+      : 'Unable to send pack payment request.';
     render();
   });
 }
@@ -5063,25 +5538,38 @@ function doSaveQuickPayment() {
 
 function doRenewPack() {
   const f = state.modalForm;
-  if (!(f.totalShakes !== '' && Number(f.totalShakes) > 0 && f.cost !== '' && Number(f.cost) >= 0)) return;
-  const id = state.modal.id;
-  const c = state.customers.find(x => x.id === id);
-  delete c.registrationOnly;
-  const startDate = f.startDate || todayStr();
-  const type = packType(f.packType);
-  c.packs = c.packs || [];
-  c.packs.push({
-    id: uid(), packType: type.id, totalShakes: Number(f.totalShakes), usedOffset: 0,
-    cost: Number(f.cost) || 0, startDate, expiryDate: packExpiryDate(type.id, startDate)
+  const id = state.modal && state.modal.id;
+  const customer = state.customers.find(function (entry) {
+    return entry.id === id && !entry.deleted;
   });
-  if (Number(f.initialPayment) > 0) {
-    c.payments = c.payments || [];
-    c.payments.push({ id: uid(), amount: Number(f.initialPayment), date: startDate, note: 'New pack payment', ts: Date.now() });
+  if (!f || !customer || f.busy) return;
+  if (!customer.login || !customer.login.uid) {
+    f.error = 'This customer needs a linked Club Ledger login to receive an in-app payment request. Link or create their login first.';
+    render();
+    return;
   }
-  saveData();
-  state.modal = null;
-  state.modalForm = null;
-  render();
+  if (!f.packType || !(Number(state.ownerPaymentSettings.packPrices[f.packType]) > 0)) {
+    f.error = 'Choose a pack with a price configured in Settings.';
+    render();
+    return;
+  }
+  f.busy = true;
+  f.error = '';
+  createOwnerPackRequest(customer.id, f.packType).then(function () {
+    state.paymentSettingsMessage = 'Pack payment request sent. It will activate after you confirm the customer’s UPI payment.';
+    state.paymentError = '';
+    state.modal = null;
+    state.modalForm = null;
+    state.tab = 'dashboard';
+    render();
+  }).catch(function (error) {
+    if (state.modalForm !== f) return;
+    f.busy = false;
+    f.error = error && error.message
+      ? 'Unable to send pack payment request. ' + error.message
+      : 'Unable to send pack payment request.';
+    render();
+  });
 }
 
 /* ---- v10: customer logins ---- */
