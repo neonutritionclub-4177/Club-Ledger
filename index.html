@@ -999,7 +999,8 @@ function refreshPendingRegistrations(clubId) {
       if (result.error) throw result.error;
       state.pendingRegistrations = (result.data || []).map(function (entry) {
         return Object.assign({}, entry, {
-          id: entry.user_uid, uid: entry.user_uid, name: entry.customer_name, clubId: entry.club_id
+          id: entry.user_uid, uid: entry.user_uid, name: entry.customer_name,
+          clubId: entry.club_id, createdAt: entry.created_at
         });
       });
       render();
@@ -1701,6 +1702,11 @@ function updateBoundFormControls() {
   let valid = true;
 
   switch (modal.type) {
+    case 'approvalPack':
+      action = 'saveApprovalPack';
+      valid = Boolean(f.packType && Number(f.totalShakes) > 0 &&
+        f.cost !== '' && Number(f.cost) >= 0 && !f.busy);
+      break;
     case 'adminEditOwner':
       action = 'adminOwnerEdit';
       valid = Boolean(f.ownerName && f.ownerName.trim() && f.clubName && f.clubName.trim() &&
@@ -2020,7 +2026,7 @@ function renderAdminRequestGroups(entries) {
             ${!state.adminShowArchived && status === 'pending' ? `<button class="btn-pay-mini" data-action="approveOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Approve</button><button class="btn-remind" data-action="rejectOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Reject</button>` : ''}
             ${!state.adminShowArchived && status === 'approved' ? `<button class="btn-remind" data-action="revokeOwner" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Revoke access</button>` : ''}
             ${!state.adminShowArchived && status === 'revoked' ? `<button class="btn-pay-mini" data-action="restoreOwnerAccess" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Restore access</button>` : ''}
-            <button class="btn-remind" data-action="editOwnerRequest" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>Edit</button>
+            <button class="btn-remind" data-action="editOwnerRequest" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>${status === 'revoked' ? 'Edit / renew details' : 'Edit'}</button>
             <button class="btn-remind" data-action="${state.adminShowArchived ? 'restoreOwnerRequest' : 'archiveOwnerRequest'}" data-id="${escapeHtml(entry.uid)}" ${busy ? 'disabled' : ''}>${state.adminShowArchived ? 'Restore history' : 'Archive'}</button>
           </div>
         </div>`;
@@ -2527,9 +2533,12 @@ function renderDashboard(totals) {
 }
 
 function renderCustomers() {
-  const customers = activeCustomers();
+  const deletedView = state.filter === 'deleted';
+  const customers = deletedView
+    ? state.customers.filter(c => c.deleted)
+    : activeCustomers();
   const filtered = customers
-    .filter(c => state.filter === 'all' ? true : statusOf(c) === state.filter)
+    .filter(c => deletedView || state.filter === 'all' ? true : statusOf(c) === state.filter)
     .filter(c => {
       const q = state.search.trim().toLowerCase();
       if (!q) return true;
@@ -2537,18 +2546,27 @@ function renderCustomers() {
     })
     .sort((a, b) => balanceOf(b) - balanceOf(a));
 
-  const filters = [['all', 'All'], ['unpaid', 'Unpaid'], ['partial', 'Partial'], ['paid', 'Paid up']];
+  const filters = [
+    ['all', 'All'],
+    ['unpaid', 'Unpaid'],
+    ['partial', 'Partial'],
+    ['paid', 'Paid up'],
+    ['deleted', 'Deleted (' + state.customers.filter(c => c.deleted).length + ')']
+  ];
 
   let listHtml;
   if (customers.length === 0) {
-    listHtml = `<div class="empty-state"><p class="title">No customers yet</p><p class="subtitle">Tap the + button to add your first customer.</p></div>`;
+    listHtml = deletedView
+      ? `<div class="empty-state"><p class="title">No deleted customers</p><p class="subtitle">Deleted customers are kept here until you restore or permanently delete them.</p></div>`
+      : `<div class="empty-state"><p class="title">No customers yet</p><p class="subtitle">Tap the + button to add your first customer.</p></div>`;
   } else if (filtered.length === 0) {
     listHtml = `<div class="empty-state"><p class="title">No matches</p><p class="subtitle">Try a different search or filter.</p></div>`;
   } else {
-    listHtml = `<div class="customer-list">${filtered.map(renderCustomerCard).join('')}</div>`;
+    listHtml = `<div class="customer-list">${filtered.map(deletedView ? renderDeletedCustomerCard : renderCustomerCard).join('')}</div>`;
   }
 
   return `
+    ${deletedView ? `<div class="card"><h3 class="section-title">Deleted customers</h3><p class="empty-state-text">These customers are excluded from active totals and kept in your cloud data and downloadable backups until permanently deleted.</p><button class="link-btn" data-action="openBackup">Open backup &amp; restore</button></div>` : ''}
     <div class="search-box">
       ${ICONS.search}
       <input id="search-input" type="text" placeholder="Search name or phone" value="${escapeHtml(state.search)}" data-bind="search">
@@ -2557,8 +2575,25 @@ function renderCustomers() {
       ${filters.map(([val, label]) => `<button class="chip ${state.filter === val ? 'active' : ''}" data-action="setFilter" data-value="${val}">${label}</button>`).join('')}
     </div>
     ${listHtml}
-    <button class="fab" data-action="openAddCustomer" aria-label="Add customer">${ICONS.plus}</button>
+    ${deletedView ? '' : `<button class="fab" data-action="openAddCustomer" aria-label="Add customer">${ICONS.plus}</button>`}
   `;
+}
+
+function renderDeletedCustomerCard(customer) {
+  return `<div class="customer-card">
+    <div class="customer-head">
+      <div>
+        <p class="customer-name">${escapeHtml(customer.name)}</p>
+        <p class="customer-package">${escapeHtml(customer.phone || 'No mobile number')} · Deleted ${formatDateShort(localDateStr(customer.updatedAt || customer.createdAt))}</p>
+      </div>
+    </div>
+    <div class="customer-details">
+      <div class="detail-actions">
+        <button class="btn-primary-sm" data-action="restoreCustomer" data-id="${escapeHtml(customer.id)}">Restore customer</button>
+        <button class="btn-icon delete" data-action="openPermanentDeleteCustomer" data-id="${escapeHtml(customer.id)}">${ICONS.trash} Permanently delete</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function renderLoginBox(c) {
@@ -3248,6 +3283,8 @@ function renderModal() {
   if (m.type === 'quickPayment') return renderQuickPaymentModal();
   if (m.type === 'renew') return renderRenewModal(m);
   if (m.type === 'delete') return renderDeleteModal(m);
+  if (m.type === 'permanentDeleteCustomer') return renderPermanentDeleteCustomerModal(m);
+  if (m.type === 'approvalPack') return renderApprovalPackModal(m);
   if (m.type === 'backup') return renderBackupModal();
   if (m.type === 'addOrder' || m.type === 'editOrder') return renderOrderFormModal(m);
   if (m.type === 'orderPayment') return renderOrderPaymentModal(m);
@@ -3309,8 +3346,67 @@ function renderLinkRegistrationModal(m) {
             }).join('')}
           </select>
         </div>
-        <p class="field-hint">The customer login will only see the portal snapshot for the linked record. Add a pack after approval if the customer does not already have one.</p>
+        <p class="field-hint">After approval, you will choose this customer's pack and payment details.</p>
         <button class="btn-save" data-action="approveRegistration" ${f.busy ? 'disabled' : ''}>${f.busy ? 'Linking…' : 'Approve &amp; link'}</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderApprovalPackModal(m) {
+  const customer = state.customers.find(function (entry) { return entry.id === m.id && !entry.deleted; });
+  if (!customer) return '';
+  const f = state.modalForm || {};
+  const valid = f.packType && Number(f.totalShakes) > 0 &&
+    f.cost !== '' && Number(f.cost) >= 0 && !f.busy;
+  return `
+    <div class="modal-overlay">
+      <div class="modal-card">
+        <div class="modal-head"><h2>Choose customer pack</h2><button data-action="closeApprovalPack">${ICONS.x}</button></div>
+        <p class="modal-sub">${escapeHtml(customer.name)} is approved and linked. Choose their first pack to finish setup.</p>
+        ${f.error ? `<div class="auth-error" role="alert">${escapeHtml(f.error)}</div>` : ''}
+        <div class="field"><label>Pack type *</label>
+          <select data-pack-type-select>
+            <option value="" ${!f.packType ? 'selected' : ''}>Choose a pack</option>
+            ${CONFIG.packTypes.map(function (type) {
+              return `<option value="${escapeHtml(type.id)}" ${f.packType === type.id ? 'selected' : ''}>${escapeHtml(type.label)}${type.id === 'custom' ? '' : ' (' + type.totalShakes + ' shakes)'}</option>`;
+            }).join('')}
+          </select>
+        </div>
+        <div class="field"><label>Pack size (shakes) *</label>
+          ${shakeQuickChips('modalForm.totalShakes')}
+          <input type="number" inputmode="numeric" data-bind="modalForm.totalShakes" value="${escapeHtml(f.totalShakes || '')}" placeholder="Choose a pack type">
+        </div>
+        <div class="field"><label>Pack cost (₹) *</label>
+          <input type="number" inputmode="decimal" data-bind="modalForm.cost" value="${escapeHtml(f.cost || '')}" placeholder="Enter pack cost">
+        </div>
+        <div class="field"><label>Pack start date</label>
+          <input type="date" data-bind="modalForm.startDate" value="${escapeHtml(f.startDate || todayStr())}">
+        </div>
+        <div class="field"><label>Payment received now (optional)</label>
+          <input type="number" inputmode="decimal" data-bind="modalForm.initialPayment" value="${escapeHtml(f.initialPayment || '')}" placeholder="0">
+        </div>
+        <button class="btn-save" data-action="saveApprovalPack" ${valid ? '' : 'disabled'}>${f.busy ? 'Saving pack…' : 'Save pack and finish approval'}</button>
+        <button class="link-btn" data-action="closeApprovalPack" ${f.busy ? 'disabled' : ''}>Finish later</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderPermanentDeleteCustomerModal(m) {
+  const customer = state.customers.find(function (entry) { return entry.id === m.id && entry.deleted; });
+  if (!customer) return '';
+  const f = state.modalForm || {};
+  return `
+    <div class="modal-overlay">
+      <div class="modal-card">
+        <div class="modal-head"><h2>Permanently delete customer?</h2><button data-action="closeModal">${ICONS.x}</button></div>
+        <p class="modal-sub">${escapeHtml(customer.name)} and their attendance, pack, and payment history will be permanently removed from the cloud database and backups. Any customer login will also be deleted. This cannot be undone.</p>
+        ${f.error ? `<div class="auth-error" role="alert">${escapeHtml(f.error)}</div>` : ''}
+        <div class="confirm-actions">
+          <button class="cancel" data-action="closeModal" ${f.busy ? 'disabled' : ''}>Cancel</button>
+          <button class="delete" data-action="confirmPermanentDeleteCustomer" data-id="${escapeHtml(customer.id)}" ${f.busy ? 'disabled' : ''}>${f.busy ? 'Deleting…' : 'Permanently delete'}</button>
+        </div>
       </div>
     </div>
   `;
@@ -3711,7 +3807,9 @@ function handleAction(action, target) {
       supabaseClient.auth.signOut();
       break;
     case 'setAdminTab':
-      state.adminTab = target.dataset.value === 'reports' ? 'reports' : 'dashboard';
+      state.adminTab = ['dashboard', 'customers', 'orders', 'attendance', 'reports'].includes(target.dataset.value)
+        ? target.dataset.value
+        : 'dashboard';
       render();
       break;
     case 'setTab':
@@ -3837,6 +3935,12 @@ function handleAction(action, target) {
       break;
     }
     case 'approveRegistration': doLinkRegistration(); break;
+    case 'saveApprovalPack': doSaveApprovalPack(); break;
+    case 'closeApprovalPack':
+      state.modal = null;
+      state.modalForm = null;
+      render();
+      break;
     case 'doLogout': doLogout(); break;
     case 'openAccount':
       state.modal = { type: 'account' };
@@ -3911,6 +4015,13 @@ function handleAction(action, target) {
     case 'saveQuickPayment': doSaveQuickPayment(); break;
     case 'saveRenew': doRenewPack(); break;
     case 'confirmDelete': doDeleteCustomer(id); break;
+    case 'restoreCustomer': doRestoreCustomer(id); break;
+    case 'openPermanentDeleteCustomer':
+      state.modal = { type: 'permanentDeleteCustomer', id: id };
+      state.modalForm = { busy: false, error: '' };
+      render();
+      break;
+    case 'confirmPermanentDeleteCustomer': doPermanentlyDeleteCustomer(id); break;
     case 'navDate':
       state.attendanceDate = addDays(state.attendanceDate, Number(target.dataset.delta));
       render();
@@ -4121,12 +4232,80 @@ function doLinkRegistration() {
       .select('user_uid').single();
   }).then(function (result) {
     if (result.error) throw result.error;
-    state.modal = null;
-    state.modalForm = null;
+    state.modal = { type: 'approvalPack', id: customer.id };
+    state.modalForm = {
+      packType: '', totalShakes: '', cost: '', startDate: todayStr(),
+      initialPayment: '', packId: '', paymentId: '', busy: false, error: ''
+    };
     render();
   }).catch(function (err) {
     form.busy = false;
     form.error = err && err.message ? err.message : authErrorText(err);
+    render();
+  });
+}
+
+function doSaveApprovalPack() {
+  const form = state.modalForm;
+  const customerId = state.modal && state.modal.id;
+  const customer = state.customers.find(function (entry) {
+    return entry.id === customerId && !entry.deleted;
+  });
+  if (!form || !customer || form.busy) return;
+  const totalShakes = Number(form.totalShakes);
+  const cost = Number(form.cost);
+  const initialPayment = Number(form.initialPayment || 0);
+  if (!form.packType || !Number.isFinite(totalShakes) || totalShakes <= 0 ||
+      !Number.isFinite(cost) || cost < 0 ||
+      !Number.isFinite(initialPayment) || initialPayment < 0) {
+    form.error = 'Choose a pack and enter a valid pack size and cost.';
+    render();
+    return;
+  }
+  form.busy = true;
+  form.error = '';
+  form.packId = form.packId || uid();
+  form.paymentId = form.paymentId || uid();
+  const startDate = form.startDate || todayStr();
+  customer.packs = customer.packs || [];
+  if (!customer.packs.some(function (pack) { return pack.id === form.packId; })) {
+    customer.packs.push({
+      id: form.packId,
+      packType: form.packType,
+      totalShakes: totalShakes,
+      usedOffset: 0,
+      cost: cost,
+      startDate: startDate,
+      expiryDate: packExpiryDate(form.packType, startDate),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      deleted: false
+    });
+  }
+  customer.registrationOnly = false;
+  if (initialPayment > 0 && !(customer.payments || []).some(function (payment) {
+    return payment.id === form.paymentId;
+  })) {
+    customer.payments = customer.payments || [];
+    customer.payments.push({
+      id: form.paymentId,
+      amount: initialPayment,
+      date: startDate,
+      note: 'Initial pack payment',
+      ts: Date.now()
+    });
+  }
+  form.busy = false;
+  saveData().then(function (synced) {
+    if (!synced) {
+      form.error = 'The pack is saved locally, but cloud sync failed. Check the connection and retry.';
+      render();
+      return;
+    }
+    state.modal = null;
+    state.modalForm = null;
+    state.tab = 'customers';
+    state.expandedId = customer.id;
     render();
   });
 }
@@ -4290,10 +4469,52 @@ function doDeleteCustomer(id) {
   const gone = state.customers.find(c => c.id === id);
   if (gone && gone.login && gone.login.uid) delete portalSig[gone.login.uid];
   if (gone) gone.deleted = true;
+  if (gone) gone.updatedAt = Date.now();
   if (state.expandedId === id) state.expandedId = null;
   saveData();
   state.modal = null;
   render();
+}
+
+function doRestoreCustomer(id) {
+  const customer = state.customers.find(entry => entry.id === id && entry.deleted);
+  if (!customer) return;
+  customer.deleted = false;
+  customer.updatedAt = Date.now();
+  state.filter = 'all';
+  saveData();
+  render();
+}
+
+function doPermanentlyDeleteCustomer(id) {
+  const form = state.modalForm;
+  const customer = state.customers.find(entry => entry.id === id && entry.deleted);
+  const clubId = state.session.profile && state.session.profile.clubId;
+  if (!form || !customer || form.busy) return;
+  if (!clubId) {
+    form.error = 'Club details are unavailable. Sign in again before deleting customer data.';
+    render();
+    return;
+  }
+  form.busy = true;
+  form.error = '';
+  render();
+  manageAccount('customer-delete-permanently', { clubId: clubId, customerId: id })
+    .then(function (result) {
+      if (!result || !result.removed) throw new Error('The server did not confirm permanent deletion.');
+      if (customer.login && customer.login.uid) delete portalSig[customer.login.uid];
+      state.customers = state.customers.filter(entry => entry.id !== id);
+      state.lastModified = Math.max(Date.now(), state.lastModified + 1);
+      if (!persistData()) throw new Error(state.storageError || 'Unable to save the updated customer list on this device.');
+      state.modal = null;
+      state.modalForm = null;
+      render();
+    })
+    .catch(function (err) {
+      form.busy = false;
+      form.error = authErrorText(err);
+      render();
+    });
 }
 
 function doToggleVisit(id) {
@@ -4503,10 +4724,11 @@ document.body.addEventListener('change', function (e) {
     return;
   }
   if (e.target.matches('[data-pack-type-select]') && state.modalForm) {
-    const selected = packType(e.target.value);
-    state.modalForm.packType = selected.id;
-    state.modalForm.totalShakes = String(selected.totalShakes);
-    state.modalForm.cost = String(selected.price);
+    const selectedId = e.target.value;
+    const selected = selectedId ? packType(selectedId) : null;
+    state.modalForm.packType = selected ? selected.id : '';
+    state.modalForm.totalShakes = selected ? String(selected.totalShakes) : '';
+    state.modalForm.cost = selected ? String(selected.price) : '';
     if (Object.prototype.hasOwnProperty.call(state.modalForm, 'remainingShakes')) {
       state.modalForm.remainingShakes = String(selected.totalShakes);
     }
