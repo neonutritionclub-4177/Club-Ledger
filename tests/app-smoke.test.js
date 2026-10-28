@@ -48,6 +48,7 @@ function createApp() {
       state, orderTotal, orderBalance, balanceOf, attendanceCount, shakesRemaining,
       doAdjustAttendance, doDeletePayment, activeCustomers, mergeRecords, migrateCustomer,
       migrateBackupCustomer, portalFor, saveData, renderLogin, currentClubName, renderAdminPage,
+      applyAdminClubFilter,
       renderApp, renderModal, authErrorText, OWNER_APPROVAL_WHATSAPP
     };
   `, context);
@@ -222,6 +223,46 @@ test('admin route renders a sign-in screen and an owner approval queue', () => {
   assert.match(historyHtml, /data-action="restoreOwnerAccess"/);
 });
 
+test('admin reports aggregate clubs and identify the club for daily and monthly entries', () => {
+  const { api } = createApp();
+  api.state.adminAuthenticated = true;
+  api.state.adminClubs = [
+    {
+      id: 'club-a', name: 'Nutrition Club A', approved: true,
+      ledger: {
+        customers: [{
+          id: 'customer-a', name: 'A Customer', joinDate: '2026-10-01',
+          visits: ['2026-10-28'], packs: [],
+          payments: [{ id: 'payment-a', date: '2026-10-28', amount: 250 }]
+        }],
+        orders: []
+      }
+    },
+    {
+      id: 'club-b', name: 'Nutrition Club B', approved: true,
+      ledger: {
+        customers: [{
+          id: 'customer-b', name: 'B Customer', joinDate: '2026-10-01',
+          visits: ['2026-10-28'], packs: [],
+          payments: [{ id: 'payment-b', date: '2026-10-28', amount: 450 }]
+        }],
+        orders: []
+      }
+    }
+  ];
+  api.applyAdminClubFilter();
+  api.state.adminTab = 'reports';
+  api.state.reportView = 'monthly';
+  api.state.reportMonth = '2026-10';
+  const html = api.renderAdminPage();
+  assert.match(html, /All registered clubs/);
+  assert.match(html, /Nutrition Club A · A Customer/);
+  assert.match(html, /Nutrition Club B · B Customer/);
+  assert.match(html, /₹700/);
+  assert.match(html, /Daily/);
+  assert.match(html, /Monthly/);
+});
+
 test('admin history can show archived rows and the owner edit form', () => {
   const { api } = createApp();
   api.state.adminAuthenticated = true;
@@ -338,8 +379,13 @@ test('Supabase schema restricts ledger access to club owners', () => {
   assert.match(schema, /alter table public\.club_ledgers enable row level security/);
   assert.match(schema, /where club_id = target_club_id\s+and owner_uid = auth\.uid\(\)::text/);
   assert.match(schema, /create policy "Club owners can access their ledger"/);
+  assert.match(schema, /create policy "Platform admins can read all club ledgers"/);
+  assert.match(schema, /grant select, insert, update on public\.customer_registrations to authenticated/);
   assert.match(schema, /create policy "Customers and club owners can read portal cards"/);
   assert.match(schema, /grant select on public\.clubs to anon/);
+  const migration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261028000000_admin_club_reports_access.sql'), 'utf8');
+  assert.match(migration, /grant select, insert, update on public\.club_ledgers to authenticated/);
+  assert.match(migration, /create policy "Platform admins can read all club ledgers"/);
 });
 
 test('Vercel static deployment disables stale service worker caching', () => {
