@@ -171,6 +171,14 @@ Deno.serve(async (request) => {
       if (registrationsError) throw registrationsError;
       for (const registration of registrations || []) customerUids.add(registration.user_uid);
 
+      const { data: paymentRequests, error: paymentRequestsError } = await admin
+        .from("pack_payment_requests")
+        .select("customer_uid")
+        .eq("club_id", clubId)
+        .eq("customer_id", customerId);
+      if (paymentRequestsError) throw paymentRequestsError;
+      for (const paymentRequest of paymentRequests || []) customerUids.add(paymentRequest.customer_uid);
+
       for (const customerUid of customerUids) {
         const { error: deleteAuthError } = await admin.auth.admin.deleteUser(customerUid);
         if (deleteAuthError && deleteAuthError.status !== 404 &&
@@ -189,7 +197,7 @@ Deno.serve(async (request) => {
       );
       if (purgeError) {
         throw new Error(
-          "The customer login was removed, but their database history could not be purged. Retry permanent deletion. " +
+          "The customer login may have been removed, but their database records could not be fully purged. Retry permanent deletion. " +
           purgeError.message,
         );
       }
