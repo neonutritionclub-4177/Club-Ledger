@@ -21,6 +21,7 @@ function createApp() {
   const context = {
     document,
     window,
+    location: { origin: 'https://club-ledger.test', pathname: '/' },
     navigator: {},
     localStorage: {
       getItem: key => storage.has(key) ? storage.get(key) : null,
@@ -54,6 +55,7 @@ function createApp() {
       buildAdminReportData, renderAdminReportDocument, adminReportPrintHtml,
       renderOwnerPaymentSettings, renderPortalCard, upiPaymentLink,
       saveOwnerPaymentSettings, doSaveApprovalPack, doRenewPack,
+      renderRenewModal, renderOwnerPaymentRequests, deleteCustomerPackRequest,
       setSupabaseClient: function (client) { supabaseClient = client; }
     };
   `, context);
@@ -586,14 +588,31 @@ test('owner can edit UPI pack prices and customer notification offers verified U
   const paymentUrl = api.upiPaymentLink(request, 'gpay');
   assert.match(paymentUrl, /^intent:\/\/pay\?/);
   assert.match(paymentUrl, /package=com\.google\.android\.apps\.nbu\.paisa\.user/);
+  assert.match(paymentUrl, /#Intent;scheme=upi;package=/);
+  assert.doesNotMatch(paymentUrl, /play\.google\.com|browser_fallback_url/);
   assert.match(paymentUrl, /pa=owner%40upi/);
-  assert.match(paymentUrl, /am=600\.00/);
+  assert.doesNotMatch(paymentUrl, /(?:[?&])am=/);
   assert.match(paymentUrl, /cu=INR/);
   assert.equal(api.upiPaymentLink(request), '');
   assert.match(api.upiPaymentLink(request, 'phonepe'), /package=com\.phonepe\.app/);
   assert.match(api.upiPaymentLink(request, 'paytm'), /package=net\.one97\.paytm/);
   assert.match(api.upiPaymentLink(request, 'supermoney'), /package=money\.super\.payments/);
 
+  context.navigator.userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)';
+  const iosPaymentUrl = api.upiPaymentLink(request, 'gpay');
+  assert.match(iosPaymentUrl, /^upi:\/\/pay\?/);
+  assert.match(iosPaymentUrl, /pa=owner%40upi/);
+  assert.match(iosPaymentUrl, /cu=INR/);
+  assert.doesNotMatch(iosPaymentUrl, /(?:[?&])am=|#Intent;|package=/);
+
+  context.navigator.userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)';
+  context.navigator.platform = 'MacIntel';
+  context.navigator.maxTouchPoints = 5;
+  assert.match(api.upiPaymentLink(request, 'phonepe'), /^upi:\/\/pay\?/);
+
+  context.navigator.userAgent = 'Mozilla/5.0 (Linux; Android 15)';
+  context.navigator.platform = 'Linux armv8l';
+  context.navigator.maxTouchPoints = 1;
   api.state.customerPaymentRequests = [request];
   api.state.paymentError = '';
   api.state.paymentSettingsMessage = '';
@@ -610,12 +629,25 @@ test('owner can edit UPI pack prices and customer notification offers verified U
   assert.match(notification, /Paytm/);
   assert.match(notification, /SuperMoney/);
   assert.match(notification, /Pending amount: ₹600/);
+  assert.match(notification, /enter the requested amount in your UPI app/i);
   assert.doesNotMatch(notification, /Renew or choose a pack/);
-  assert.doesNotMatch(notification, /upi:\/\/pay\?/);
+  assert.match(notification, /intent:\/\/pay\?/);
+  assert.doesNotMatch(notification, /play\.google\.com|browser_fallback_url/);
   assert.match(notification, /UPI transaction ID \/ UTR/);
   assert.match(notification, /I have paid/);
   assert.match(notification, /Decline request/);
   assert.match(notification, /activates only after the owner verifies payment/);
+  api.state.customerPaymentRequests = [
+    { id: 'old-declined', status: 'declined', amount: 500 },
+    { id: 'old-confirmed', status: 'confirmed', amount: 1000 }
+  ];
+  const historyOnly = api.renderPortalCard({
+    name: 'Customer', shakesLeft: 1, shakesTotal: 6, lowAt: 2,
+    packExpiryDate: '', balance: 0, credit: 0, packs: [], payments: [],
+    visits: [], attendanceCounts: []
+  });
+  assert.doesNotMatch(historyOnly, /Payment notification|Payment request declined|Payment verified; pack activated/);
+  api.state.customerPaymentRequests = [request];
   api.state.session = { profile: { clubId: 'club-pay' } };
   assert.equal(api.portalFor({
     name: 'Customer', packs: [], payments: [], visits: [], attendanceCounts: {}
@@ -659,6 +691,8 @@ test('owner can set a custom shake count and amount for a customer renewal', () 
   const modal = api.renderModal();
   assert.match(modal, /Pack size \(shakes\)/);
   assert.match(modal, /Customer amount \(₹\)/);
+  assert.doesNotMatch(modal, /Customer price: ₹3,000/);
+  assert.match(modal, /Requesting 18 shakes for ₹1,450/);
   assert.match(modal, /Send pack payment request/);
 
   const calls = [];
@@ -690,6 +724,31 @@ test('owner can set a custom shake count and amount for a customer renewal', () 
     assert.equal(customer.packs.length, 1);
     assert.equal(api.state.modal, null);
   });
+});
+
+test('owner can delete a payment request without changing the customer ledger', async () => {
+  const { api } = createApp();
+  api.state.ownerPaymentRequests = [{
+    id: 'request-delete-1', customer_id: 'customer-1', status: 'pending', amount: 1250
+  }];
+  const html = api.renderOwnerPaymentRequests();
+  assert.match(html, /Delete request/);
+  assert.match(html, /request-delete-1/);
+  const calls = [];
+  api.setSupabaseClient({
+    rpc: (name, args) => {
+      calls.push({ name, args });
+      return Promise.resolve({ data: { id: args.target_request_id, removed: true }, error: null });
+    }
+  });
+  api.deleteCustomerPackRequest('request-delete-1');
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'delete_customer_pack_request');
+  assert.equal(calls[0].args.target_request_id, 'request-delete-1');
+  assert.equal(api.state.ownerPaymentRequests.length, 0);
+  assert.match(api.state.paymentSettingsMessage, /ledger history was not changed/);
 });
 
 test('approval pack request does not activate the pack until owner payment verification', async () => {
@@ -851,6 +910,16 @@ test('outdated account function errors explain that deployment is required', () 
   );
 });
 
+test('missing payment request RPC errors explain that the database migration is required', () => {
+  const { api } = createApp();
+  assert.match(
+    api.authErrorText({
+      message: 'Could not find the function public.delete_customer_pack_request(target_request_id) in the schema cache'
+    }),
+    /payment-request deletion database migration is missing.*Apply the latest Supabase migration/i
+  );
+});
+
 test('Supabase schema scopes data and protects owner approvals', () => {
   const schema = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'schema.sql'), 'utf8');
   assert.match(schema, /create table if not exists public\.owner_requests/);
@@ -921,8 +990,12 @@ test('UPI payment migration only activates packs after owner confirmation', () =
   assert.doesNotMatch(migration, /grant execute on function public\.create_owner_pack_offer/);
   assert.match(migration, /current_pack ->> 'totalShakes'/);
   assert.match(migration, /current_expiry \+ request_row\.duration_days/);
-  assert.match(migration, /pg_advisory_xact_lock\(hashtextextended\(customer_uid, 0\)\)/);
-  assert.match(migration, /requests\.status in \('pending', 'payment_submitted'\)/);
+  assert.match(migration, /pg_advisory_xact_lock\(hashtextextended\(v_customer_uid, 0\)\)/);
+  assert.match(migration, /requests\.customer_uid = v_customer_uid/);
+  assert.doesNotMatch(migration, /requests\.customer_uid = customer_uid/);
+  assert.match(migration, /create or replace function public\.delete_customer_pack_request/);
+  assert.match(migration, /public\.is_club_owner\(requests\.club_id\)/);
+  assert.match(migration, /grant execute on function public\.delete_customer_pack_request\(text\) to authenticated/);
   assert.match(migration, /if request_row\.status <> 'payment_submitted'/);
   assert.match(migration, /if not approve_payment then/);
   assert.match(migration, /'status', 'confirmed'/);
@@ -935,8 +1008,31 @@ test('UPI payment migration only activates packs after owner confirmation', () =
   assert.match(schema, /create table if not exists public\.club_payment_settings/);
   assert.match(combined, /create table if not exists public\.club_payment_settings/);
   const marker = '-- Manual UPI pack request flow';
-  assert.equal(schema.slice(schema.indexOf(marker) + marker.length).trim(), migration.trim());
-  assert.equal(combined.slice(combined.indexOf(marker) + marker.length).trim(), migration.trim());
+  const cleanupMarker = '-- Customer data cleanup and RPC fix';
+  const embeddedPaymentMigration = (text) => {
+    const section = text.slice(text.indexOf(marker) + marker.length);
+    return section.slice(0, section.indexOf(cleanupMarker)).trim();
+  };
+  assert.equal(embeddedPaymentMigration(schema), migration.trim());
+  assert.equal(embeddedPaymentMigration(combined), migration.trim());
+
+  const cleanupMigration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261029000001_customer_data_cleanup.sql'), 'utf8');
+  assert.match(cleanupMigration, /create or replace function public\.create_owner_pack_request/);
+  assert.match(cleanupMigration, /v_customer_uid/);
+  assert.doesNotMatch(cleanupMigration, /requests\.customer_uid = customer_uid/);
+  assert.match(cleanupMigration, /create or replace function public\.delete_customer_pack_request/);
+  assert.match(cleanupMigration, /delete from public\.customer_portals/);
+  assert.match(cleanupMigration, /delete from public\.customer_registrations/);
+  assert.match(cleanupMigration, /delete from public\.pack_payment_requests/);
+  assert.match(cleanupMigration, /entries\.entry ->> 'id' is distinct from target_customer_id/);
+  assert.match(cleanupMigration, /grant execute on function public\.delete_customer_pack_request\(text\) to authenticated/);
+  assert.match(schema, /-- Customer data cleanup and RPC fix/);
+  assert.match(combined, /-- Customer data cleanup and RPC fix/);
+  const embeddedCleanupMigration = (text) => text.slice(
+    text.indexOf(cleanupMarker) + cleanupMarker.length
+  ).trim();
+  assert.equal(embeddedCleanupMigration(schema), cleanupMigration.trim());
+  assert.equal(embeddedCleanupMigration(combined), cleanupMigration.trim());
 });
 
 test('Vercel static deployment disables stale service worker caching', () => {
@@ -988,6 +1084,7 @@ test('Vercel static deployment disables stale service worker caching', () => {
   assert.match(functionSource, /action === "admin-owner-edit"/);
   assert.match(functionSource, /action === "customer-delete-permanently"/);
   assert.match(functionSource, /permanently_delete_customer/);
+  assert.match(functionSource, /from\("pack_payment_requests"\)/);
   assert.match(functionSource, /from\("platform_admins"\)/);
   assert.match(functionSource, /const email = cleanEmail\(body\.email\)/);
   assert.match(functionSource, /email,/);
