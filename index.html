@@ -1270,6 +1270,9 @@ function randomPassword() {
 }
 function authErrorText(err) {
   const code = (err && err.code) || '';
+  if (/could not find the function.*delete_customer_pack_request|delete_customer_pack_request.*schema cache/i.test((err && err.message) || '')) {
+    return 'The payment-request deletion database migration is missing. Apply the latest Supabase migration to the same project used by this app, then try again.';
+  }
   if (code === 'edge_function_unavailable') {
     return 'The account-management function is unavailable. Deploy the latest manage-account function in Supabase, then try again.';
   }
